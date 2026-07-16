@@ -1,6 +1,6 @@
 """
-Kesişim Radar - Telegram Sinyal Botu (Bybit Entegrasyonlu - Kesintisiz Sürüm)
-IP engellerini ve rate-limit (429) sorunlarını aşmak için veri sağlayıcı olarak Bybit kullanır.
+Kesişim Radar - Telegram Sinyal Botu (OKX Entegrasyonlu - Kesintisiz Sürüm)
+GitHub Actions IP engellerini (403 Forbidden) aşmak için en stabil büyük borsa olan OKX API'sini kullanır.
 """
 
 import json
@@ -16,17 +16,17 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# Taranacak popüler çiftler (Bybit üzerindeki USDT çiftleri)
+# Taranacak popüler çiftler (OKX üzerindeki USDT spot çiftleri)
 POPULAR_USDT_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", 
-    "DOTUSDT", "DOGEUSDT", "SHIBUSDT", "LINKUSDT", "NEARUSDT", "LTCUSDT", "UNIUSDT", 
-    "OPUSDT", "ARBUSDT", "APTUSDT", "SUIUSDT", "INJUSDT", "TIAUSDT", "FILUSDT", 
-    "ATOMUSDT", "ICPUSDT", "FETUSDT", "GRTUSDT", "FTMUSDT", "STXUSDT", "GALAUSDT", 
-    "ALGOUSDT", "AAVEUSDT", "MKRUSDT", "CRVUSDT", "RUNEUSDT", "WIFUSDT", "PEPEUSDT", 
-    "FLOKIUSDT", "BONKUSDT", "JUPUSDT"
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
+    "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
+    "OP-USDT", "ARB-USDT", "APT-USDT", "SUI-USDT", "INJ-USDT", "TIA-USDT", "FIL-USDT", 
+    "ATOM-USDT", "ICP-USDT", "FET-USDT", "GRT-USDT", "FTM-USDT", "STX-USDT", "GALA-USDT", 
+    "ALGO-USDT", "AAVE-USDT", "MKR-USDT", "CRV-USDT", "RUNE-USDT", "WIF-USDT", "PEPE-USDT", 
+    "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
-TIMEFRAME = "15"  # Bybit için 15 dakika
+TIMEFRAME = "15m"  # OKX için 15 dakika kline parametresi
 PROXIMITY_PIVOT = 0.85      # %
 PROXIMITY_FIB = 1.0         # %
 MIN_CONFIDENCE_TO_NOTIFY = 20
@@ -34,14 +34,14 @@ MIN_CONFIDENCE_TO_NOTIFY = 20
 # ============================= HTML Safe Helper =============================
 
 def html_escape(text):
-    """Telegram mesajlarında HTML etiket hatası (400 Bad Request) almamak için metni temizler."""
+    """Telegram mesajlarında HTML etiket hatası almamak için metni temizler."""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 # ============================= HTTP Helpers =============================
 
 def http_get_json(url):
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
     })
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
@@ -71,28 +71,27 @@ def send_message(text):
     })
 
 
-# ============================= Bybit Data Fetching =============================
+# ============================= OKX Data Fetching =============================
 
-def fetch_klines_bybit(symbol):
-    """Bybit v5 API'sini kullanarak son mum verilerini çeker."""
-    # 15m timeframe için son 100 mumu çekeriz (indikatörler için fazlasıyla yeterli)
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={TIMEFRAME}&limit=100"
+def fetch_klines_okx(symbol):
+    """OKX v5 API'sini kullanarak son mum verilerini çeker."""
+    # OKX public kline url'i
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=100"
     data = http_get_json(url)
     
-    if data.get("retCode") != 0:
-        raise ValueError(f"Bybit API Hatası: {data.get('retMsg')}")
+    if data.get("code") != "0":
+        raise ValueError(f"OKX API Hatası: {data.get('msg')}")
         
-    raw_list = data.get("result", {}).get("list", [])
+    raw_list = data.get("data", [])
     if not raw_list:
         raise ValueError(f"{symbol} için mum verisi alınamadı.")
         
-    # Bybit verileri yeniden eskiye doğru verir (en yeni mum listenin başındadır).
-    # Bizim kodumuzun çalışması için eskiden yeniye sıralıyoruz.
+    # OKX verileri en yeni mumdan en eskiye doğru verir. Eskiden yeniye sıralıyoruz.
     raw_list.reverse()
     
     candles = []
     for item in raw_list:
-        # Bybit kline formatı: [start_time, open, high, low, close, volume, turnover]
+        # OKX kline formatı: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
         candles.append({
             "openTime": int(item[0]),
             "open": float(item[1]),
@@ -100,24 +99,24 @@ def fetch_klines_bybit(symbol):
             "low": float(item[3]),
             "close": float(item[4]),
             "volume": float(item[5]),
-            "closeTime": int(item[0]) + 900000 # 15 dakika ekle
+            "closeTime": int(item[0]) + 900000
         })
     return candles
 
 
-def fetch_prev_daily_bybit(symbol):
-    """Bybit üzerinden bir önceki günün Günlük mum (D) verilerini çeker (Pivot için)."""
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval=D&limit=2"
+def fetch_prev_daily_okx(symbol):
+    """OKX üzerinden bir önceki günün Günlük mum (1Dutc) verilerini çeker (Pivot için)."""
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
     data = http_get_json(url)
     
-    if data.get("retCode") != 0:
+    if data.get("code") != "0":
         return None
         
-    raw_list = data.get("result", {}).get("list", [])
+    raw_list = data.get("data", [])
     if len(raw_list) < 2:
         return None
         
-    # Listenin 0. elemanı bugünün devam eden mumu, 1. elemanı dün kapanan mumdur.
+    # OKX'te 0. indeks bugünün mumu, 1. indeks dünün tamamlanmış mumudur.
     prev_day = raw_list[1]
     return {
         "high": float(prev_day[2]),
@@ -395,8 +394,9 @@ def generate_signal(symbol, candles, prev_daily):
 def format_signal_message(sig):
     emoji = {"AL": "🟢", "SAT": "🔴", "IZLE": "🟡"}[sig["direction"]]
     
-    # HTML formatlama hatalarını önlemek için değişkenleri temizliyoruz (escape)
-    sym = html_escape(sig['symbol'])
+    # OKX formatındaki "BTC-USDT" ifadesini okunabilirlik için "BTCUSDT"ye dönüştürüyoruz
+    clean_symbol = sig['symbol'].replace("-", "")
+    sym = html_escape(clean_symbol)
     dir_str = html_escape(sig['direction'])
     conf_val = int(sig['confidence'])
     price_val = sig['price']
@@ -435,11 +435,14 @@ def process_commands(state, watchlist):
         if chat_id != str(TELEGRAM_CHAT_ID):
             continue
 
-        if text.startswith("/add"):
+        # Gelen komutlarda tire (-) karakterini kullanıcıdan beklememek için temizlik yapıyoruz
+        clean_text = text.replace("USDT", "-USDT") if "USDT" in text and "-" not in text else text
+
+        if clean_text.startswith("/add"):
             if watchlist == ["ALL"]:
                 send_message("Şu an TÜM piyasa taranıyor, tekil ekleme geçersiz. Önce /manual yaz.")
                 continue
-            parts = text.split()
+            parts = clean_text.split()
             if len(parts) >= 2:
                 symbol = parts[1].upper()
                 if symbol not in POPULAR_USDT_SYMBOLS:
@@ -447,47 +450,47 @@ def process_commands(state, watchlist):
                     continue
                 if symbol not in watchlist:
                     watchlist.append(symbol)
-                    send_message(f"✅ {symbol} izleme listesine eklendi.")
+                    send_message(f"✅ {symbol.replace('-', '')} izleme listesine eklendi.")
                 else:
-                    send_message(f"{symbol} zaten listede.")
+                    send_message(f"{symbol.replace('-', '')} zaten listede.")
             else:
                 send_message("Kullanım: /add BTCUSDT")
 
-        elif text.startswith("/remove"):
+        elif clean_text.startswith("/remove"):
             if watchlist == ["ALL"]:
                 send_message("Şu an TÜM piyasa taranıyor, tekil çıkarma geçersiz. Önce /manual yaz.")
                 continue
-            parts = text.split()
+            parts = clean_text.split()
             if len(parts) >= 2:
                 symbol = parts[1].upper()
                 if symbol in watchlist:
                     watchlist.remove(symbol)
                     state.get("last_signals", {}).pop(symbol, None)
-                    send_message(f"🗑 {symbol} listeden çıkarıldı.")
+                    send_message(f"🗑 {symbol.replace('-', '')} listeden çıkarıldı.")
                 else:
-                    send_message(f"{symbol} listede değil.")
+                    send_message(f"{symbol.replace('-', '')} listede değil.")
             else:
                 send_message("Kullanım: /remove BTCUSDT")
 
         elif text.startswith("/list"):
             if watchlist == ["ALL"]:
-                send_message("🌐 Şu an popüler Bybit coinleri taranıyor.\nElle liste seçmek için /manual yaz.")
+                send_message("🌐 Şu an popüler OKX coinleri taranıyor.\nElle liste seçmek için /manual yaz.")
             elif watchlist:
-                send_message("📋 İzleme listen:\n" + "\n".join(f"• {s}" for s in watchlist))
+                send_message("📋 İzleme listen:\n" + "\n".join(f"• {s.replace('-', '')}" for s in watchlist))
             else:
                 send_message("İzleme listen boş. /add BTCUSDT ile ekleyebilirsin.")
 
         elif text.startswith("/all"):
             watchlist = ["ALL"]
             send_message(
-                "🌐 Bybit üzerinden popüler kripto taraması AÇILDI.\n"
+                "🌐 OKX üzerinden popüler kripto taraması AÇILDI.\n"
                 "Her 15 dakikada bir otomatik taranacak.\n"
                 "Elle liste seçmek istersen /manual yaz."
             )
 
         elif text.startswith("/manual"):
             if watchlist == ["ALL"]:
-                watchlist = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+                watchlist = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
                 send_message("📋 Elle liste moduna dönüldü. Varsayılan: BTCUSDT, ETHUSDT, SOLUSDT.\n/add ve /remove ile düzenleyebilirsin.")
             else:
                 send_message("Zaten elle liste modundasın.")
@@ -542,15 +545,15 @@ def main():
     else:
         symbols_to_scan = watchlist
 
-    print(f"Bybit üzerinden toplam {len(symbols_to_scan)} popüler sembol taranıyor...")
+    print(f"OKX üzerinden toplam {len(symbols_to_scan)} popüler sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
-            # Bybit çok hızlı cevap verse de sunucuyu yormamak için ufak bir bekleme (0.2sn)
-            time.sleep(0.2)
+            # OKX istek limitlerine takılmamak için hafif bir bekleme ekliyoruz
+            time.sleep(0.3)
             
-            candles = fetch_klines_bybit(symbol)
-            prev_daily = fetch_prev_daily_bybit(symbol)
+            candles = fetch_klines_okx(symbol)
+            prev_daily = fetch_prev_daily_okx(symbol)
             sig = generate_signal(symbol, candles, prev_daily)
             
             if not sig:
