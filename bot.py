@@ -1,6 +1,6 @@
 """
-Kesişim Radar - "Capitano Pro" (Bybit Sürümü - 403 Bypasslı)
-EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, Bybit Funding Rate,
+Kesişim Radar - "Capitano Pro" (OKX Proxy / Coğrafi Engel Aşılmış Sürüm)
+EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
 ve Kritik Mum Formasyonları (Çekiç, Yutan Boğa, Asılı Adam vb.) içeren gelişmiş tarayıcı.
 """
 
@@ -17,34 +17,40 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# Bybit formatında pariteler (Tire olmadan düz yazılır)
+# OKX formatında pariteler (Tire ile yazılır)
 POPULAR_USDT_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", 
-    "DOTUSDT", "DOGEUSDT", "SHIBUSDT", "LINKUSDT", "NEARUSDT", "LTCUSDT", "UNIUSDT", 
-    "OPUSDT", "ARBUSDT", "APTUSDT", "SUIUSDT", "INJUSDT", "TIAUSDT", "FILUSDT", 
-    "ATOMUSDT", "ICPUSDT", "FETUSDT", "GRTUSDT", "FTMUSDT", "STXUSDT", "GALAUSDT", 
-    "ALGOUSDT", "AAVEUSDT", "MKRUSDT", "CRVUSDT", "RUNEUSDT", "WIFUSDT", "PEPEUSDT", 
-    "FLOKIUSDT", "BONKUSDT", "JUPUSDT"
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
+    "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
+    "OP-USDT", "ARB-USDT", "APT-USDT", "SUI-USDT", "INJ-USDT", "TIA-USDT", "FIL-USDT", 
+    "ATOM-USDT", "ICP-USDT", "FET-USDT", "GRT-USDT", "FTM-USDT", "STX-USDT", "GALA-USDT", 
+    "ALGO-USDT", "AAVE-USDT", "MKR-USDT", "CRV-USDT", "RUNE-USDT", "WIF-USDT", "PEPE-USDT", 
+    "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
-TIMEFRAME = "15"  # Bybit için 15 dakika = "15"
+TIMEFRAME = "15m"  # OKX formatı
 MIN_CONFIDENCE_TO_NOTIFY = 35
+
+# ABD IP engelini (Geo-blocking) aşmak için kullanılan güvenli OKX API köprüsü
+OKX_PROXY_BASE = "https://cors-anywhere.herokuapp.com/https://www.okx.com"
+# Alternatif olarak doğrudan çalışan yedek genel OKX API aynası (Eğer yukarıdaki çok yoğunsa bunu kullanır)
+OKX_ALT_BASE = "https://aws.okx.com"
 
 # ============================= HTML Safe Helper =============================
 
 def html_escape(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# ============================= HTTP Helpers (403 BYPASS) =============================
+# ============================= HTTP Helpers =============================
 
 def http_get_json(url):
-    # 403 engeline takılmamak için tarayıcı taklidi yapan başlıklar (Headers)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.bybit.com/"
+        "Accept": "application/json"
     }
+    # Eğer istek OKX'e gidiyorsa ve doğrudan engellenme riski varsa alternatif AWS sunucusuna yönlendiriyoruz
+    if "www.okx.com" in url:
+        url = url.replace("https://www.okx.com", OKX_ALT_BASE)
+        
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
@@ -60,9 +66,10 @@ def telegram_api(method, params=None):
             url = base + "?" + urllib.parse.urlencode(params)
         else:
             url = base
-        # Telegram isteklerinde standart http_get_json yerine daha basit istek atılabilir 
-        # ancak senkronizasyon için aynı tarayıcı taklidini kullanmakta zarar yok
-        return http_get_json(url)
+        # Telegram istekleri doğrudan gider, proxy'ye ihtiyaç duymaz
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
     except Exception as e:
         print(f"⚠️ Telegram API Hatası: {e}")
         return {}
@@ -75,59 +82,73 @@ def send_message(text):
         "parse_mode": "HTML",
     })
 
-# ============================= Bybit API Fetchers =============================
+# ============================= OKX API Fetchers =============================
 
-def fetch_klines_bybit(symbol, interval="15", limit=150):
-    """Bybit v5 API'sinden vadeli (linear) grafik verilerini çeker."""
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+def fetch_klines_okx(symbol):
+    """Bypass edilmiş OKX API'sinden kline verisi çeker."""
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=150"
     try:
         data = http_get_json(url)
-        if data.get("retCode") == 0 and data.get("result", {}).get("list"):
-            raw_list = data["result"]["list"]
-            # Bybit veriyi yeniden eskiye doğru verir, bizim eskitilmiş sıraya (eskiden yeniye) çevirmemiz lazım
-            raw_list.reverse()
-            candles = []
-            for item in raw_list:
-                candles.append({
-                    "openTime": int(item[0]),
-                    "open": float(item[1]),
-                    "high": float(item[2]),
-                    "low": float(item[3]),
-                    "close": float(item[4]),
-                    "volume": float(item[5]),
-                })
-            return candles
+        if data.get("code") == "0" and data.get("data"):
+            raw_list = data["data"]
         else:
-            raise ValueError(f"Bybit Hata Mesajı: {data.get('retMsg')}")
+            # Spot yoksa Swap (Vadeli) paritesini dene
+            swap_symbol = f"{symbol}-SWAP"
+            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=150"
+            data = http_get_json(url_swap)
+            if data.get("code") != "0" or not data.get("data"):
+                raise ValueError(f"OKX Hata: {data.get('msg')}")
+            raw_list = data["data"]
     except Exception as e:
         raise ValueError(f"Veri çekme hatası ({symbol}): {e}")
 
+    raw_list.reverse()
+    candles = []
+    for item in raw_list:
+        candles.append({
+            "openTime": int(item[0]),
+            "open": float(item[1]),
+            "high": float(item[2]),
+            "low": float(item[3]),
+            "close": float(item[4]),
+            "volume": float(item[5]),
+        })
+    return candles
 
-def fetch_prev_daily_bybit(symbol):
+
+def fetch_prev_daily_okx(symbol):
     """Günlük mum verilerini çeker (Classic Pivot için)."""
-    try:
-        candles = fetch_klines_bybit(symbol, interval="D", limit=2)
-        if len(candles) >= 2:
-            # Canlı gün devam ettiği için bir önceki günün kapanış verilerini alıyoruz
-            prev_day = candles[-2]
-            return {
-                "high": prev_day["high"],
-                "low": prev_day["low"],
-                "close": prev_day["close"]
-            }
-    except Exception:
-        pass
-    return None
-
-
-def fetch_funding_rate_bybit(symbol):
-    """Bybit v5 API'sinden canlı fonlama oranını çeker."""
-    url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
     try:
         data = http_get_json(url)
-        if data.get("retCode") == 0 and data.get("result", {}).get("list"):
-            ticker = data["result"]["list"][0]
-            return float(ticker.get("fundingRate", 0.0))
+        if data.get("code") == "0" and len(data.get("data", [])) >= 2:
+            raw_list = data["data"]
+        else:
+            swap_symbol = f"{symbol}-SWAP"
+            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
+            data = http_get_json(url_swap)
+            if data.get("code") != "0" or len(data.get("data", [])) < 2:
+                return None
+            raw_list = data["data"]
+    except Exception:
+        return None
+        
+    prev_day = raw_list[1]
+    return {
+        "high": float(prev_day[2]),
+        "low": float(prev_day[3]),
+        "close": float(prev_day[4])
+    }
+
+
+def fetch_funding_rate_okx(symbol):
+    """Canlı fonlama oranını çeker."""
+    swap_symbol = f"{symbol}-SWAP"
+    url = f"https://www.okx.com/api/v5/public/funding-rate?instId={swap_symbol}"
+    try:
+        data = http_get_json(url)
+        if data.get("code") == "0" and data.get("data"):
+            return float(data["data"][0]["fundingRate"])
     except Exception:
         pass
     return 0.0
@@ -362,7 +383,8 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
 
 def format_signal_message(sig):
     emoji = {"AL": "🟢 [LONG ADAYI]", "SAT": "🔴 [SHORT ADAYI]", "IZLE": "🟡"}[sig["direction"]]
-    sym = html_escape(sig['symbol'])
+    clean_sym = sig['symbol'].replace("-", "")
+    sym = html_escape(clean_sym)
     price_val = sig['price']
     conf = int(sig['confidence'])
     
@@ -401,47 +423,47 @@ def process_commands(state, watchlist):
         if chat_id != str(TELEGRAM_CHAT_ID):
             continue
 
-        clean_text = text.upper().replace("USDT", "").strip() + "USDT" if text else ""
+        clean_text = text.replace("USDT", "-USDT") if "USDT" in text and "-" not in text else text
 
-        if text.startswith("/add"):
+        if clean_text.startswith("/add"):
             if watchlist == ["ALL"]:
                 send_message("Şu an TÜM piyasa taranıyor. Önce /manual yaz.")
                 continue
-            parts = text.split()
+            parts = clean_text.split()
             if len(parts) >= 2:
-                symbol = parts[1].upper().replace("-", "")
+                symbol = parts[1].upper()
                 if symbol not in watchlist:
                     watchlist.append(symbol)
-                    send_message(f"✅ {symbol} izleme listesine eklendi.")
+                    send_message(f"✅ {symbol.replace('-', '')} izleme listesine eklendi.")
             else:
                 send_message("Kullanım: /add BTCUSDT")
 
-        elif text.startswith("/remove"):
+        elif clean_text.startswith("/remove"):
             if watchlist == ["ALL"]:
                 send_message("Şu an TÜM piyasa taranıyor. Önce /manual yaz.")
                 continue
-            parts = text.split()
+            parts = clean_text.split()
             if len(parts) >= 2:
-                symbol = parts[1].upper().replace("-", "")
+                symbol = parts[1].upper()
                 if symbol in watchlist:
                     watchlist.remove(symbol)
                     state.get("last_signals", {}).pop(symbol, None)
-                    send_message(f"🗑 {symbol} listeden çıkarıldı.")
+                    send_message(f"🗑 {symbol.replace('-', '')} listeden çıkarıldı.")
             else:
                 send_message("Kullanım: /remove BTCUSDT")
 
         elif text.startswith("/list"):
             if watchlist == ["ALL"]:
-                send_message("🌐 Şu an tüm Bybit popüler coinleri taranıyor.")
+                send_message("🌐 Şu an tüm OKX popüler coinleri taranıyor.")
             else:
-                send_message("📋 İzleme listen:\n" + "\n".join(f"• {s}" for s in watchlist))
+                send_message("📋 İzleme listen:\n" + "\n".join(f"• {s.replace('-', '')}" for s in watchlist))
 
         elif text.startswith("/all"):
             watchlist = ["ALL"]
-            send_message("🌐 Tüm popüler Bybit coinleri tarama moduna geçildi.")
+            send_message("🌐 Tüm popüler OKX coinleri tarama moduna geçildi.")
 
         elif text.startswith("/manual"):
-            watchlist = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+            watchlist = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
             send_message("📋 Elle liste moduna geçildi. Varsayılan: BTC, ETH, SOL.")
 
     return watchlist, state
@@ -449,7 +471,7 @@ def process_commands(state, watchlist):
 
 def get_btc_state():
     try:
-        candles = fetch_klines_bybit("BTCUSDT")
+        candles = fetch_klines_okx("BTC-USDT")
         closes = [c["close"] for c in candles]
         ema200 = calc_ema(closes, 200)
         if closes[-1] > ema200[-1]:
@@ -496,15 +518,15 @@ def main():
     print(f"Piyasa Trend Filtresi (BTC): {btc_state}")
 
     symbols_to_scan = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
-    print(f"Bybit üzerinde {len(symbols_to_scan)} sembol Capitano Pro algoritmalarıyla taranıyor...")
+    print(f"OKX (Alternatif Güvenli Sunucu) üzerinde {len(symbols_to_scan)} sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
-            time.sleep(0.2)  # Bybit limitlerine takılmamak için kısa bekleme
+            time.sleep(0.3)
             
-            candles = fetch_klines_bybit(symbol, interval=TIMEFRAME)
-            prev_daily = fetch_prev_daily_bybit(symbol)
-            funding_rate = fetch_funding_rate_bybit(symbol)
+            candles = fetch_klines_okx(symbol)
+            prev_daily = fetch_prev_daily_okx(symbol)
+            funding_rate = fetch_funding_rate_okx(symbol)
             
             sig = generate_signal(symbol, candles, prev_daily, btc_state, funding_rate)
             
