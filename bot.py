@@ -1,5 +1,5 @@
 """
-Kesişim Radar - "Capitano Pro v2" (Kusursuzlaştırılmış Sürüm)
+Kesişim Radar - "Capitano Pro v2" (Kusursuzlaştırılmış & Tam Sürüm)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
 ve Mum Formasyonları içeren, GitHub Actions dostu kararlı tarayıcı.
 """
@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# OKX formatında pariteler
+# OKX formatında popüler pariteler
 POPULAR_USDT_SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
     "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
@@ -30,7 +30,7 @@ POPULAR_USDT_SYMBOLS = [
 TIMEFRAME = "15m"
 MIN_CONFIDENCE_TO_NOTIFY = 35
 
-# OKX'in kısıtlamasız ve engelsiz resmi global API aynaları
+# OKX'in engelsiz resmi global API aynaları
 OKX_API_URLS = [
     "https://www.okx.cab",  # Cloudflare engeli olmayan resmi global ayna
     "https://www.okx.com"   # Global ana sunucu
@@ -88,32 +88,34 @@ def send_message(text):
         "parse_mode": "HTML",
     })
 
-# ============================= OKX API Fetchers =============================
+# ============================= OKX API Fetchers (Geliştirilmiş & Hata Geçirmez) =============================
 
 def fetch_klines_okx(symbol):
-    """Eksiksiz veri için global OKX API'sini sorgular. limit=250 ile EMA 200 korunur."""
-    # Spot sorgusu
+    """Eksiksiz veri için global OKX API'sini sorgular. limit=250 ile EMA 200 korunur. Spotta hata alırsa Swap dener."""
     path = f"/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=250"
+    raw_list = None
+    
+    # Önce Spot Dene
     try:
         data = http_get_json(path)
         if data.get("code") == "0" and data.get("data") and len(data["data"]) > 0:
             raw_list = data["data"]
-        else:
-            # Spot yoksa doğrudan Swap (Vadeli) dene
-            raise ValueError("Spot bulunamadı, Swap denenecek")
     except Exception:
-        # Swap sorgusu (FTM-USDT -> FTM-USDT-SWAP)
+        pass  # Hata durumunda sessizce devam et, swap tahtasını deneyeceğiz
+        
+    # Spot başarısız olduysa ya da boşsa Swap (Vadeli) Dene
+    if not raw_list:
         swap_symbol = f"{symbol}-SWAP"
         path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=250"
         try:
             data = http_get_json(path_swap)
             if data.get("code") == "0" and data.get("data") and len(data["data"]) > 0:
                 raw_list = data["data"]
-            else:
-                err_msg = data.get('msg', 'Enstrüman bulunamadı')
-                raise ValueError(f"OKX Hata: {err_msg}")
         except Exception as e:
-            raise ValueError(f"Veri çekme hatası ({symbol}): {e}")
+            raise ValueError(f"Spot ve Swap verisi çekilemedi ({symbol}): {e}")
+
+    if not raw_list:
+        raise ValueError(f"Enstrüman bulunamadı veya boş veri döndü ({symbol})")
 
     raw_list.reverse()
     candles = []
@@ -132,22 +134,29 @@ def fetch_klines_okx(symbol):
 def fetch_prev_daily_okx(symbol):
     """Günlük mum verilerini çeker."""
     path = f"/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
+    raw_list = None
+    
+    # Önce Spot Dene
     try:
         data = http_get_json(path)
         if data.get("code") == "0" and len(data.get("data", [])) >= 2:
             raw_list = data["data"]
-        else:
-            raise ValueError("Spot günlük mum yok")
     except Exception:
+        pass
+        
+    # Spot başarısız olduysa Swap Dene
+    if not raw_list:
         swap_symbol = f"{symbol}-SWAP"
         path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
         try:
             data = http_get_json(path_swap)
-            if data.get("code") != "0" or len(data.get("data", [])) < 2:
-                return None
-            raw_list = data["data"]
+            if data.get("code") == "0" and len(data.get("data", [])) >= 2:
+                raw_list = data["data"]
         except Exception:
             return None
+            
+    if not raw_list:
+        return None
         
     prev_day = raw_list[1]
     return {
@@ -158,7 +167,7 @@ def fetch_prev_daily_okx(symbol):
 
 
 def fetch_funding_rate_okx(symbol):
-    """Canlı fonlama oranını çeker."""
+    """Canlı fonlama oranını çeker (Yalnızca Swap tahtalarında bulunur)."""
     swap_symbol = f"{symbol}-SWAP"
     path = f"/api/v5/public/funding-rate?instId={swap_symbol}"
     try:
@@ -385,7 +394,7 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
 
     raw_score = sum(f[2] for f in factors)
     
-    # 7) BTC Filtresi
+    # 7) BTC Filtresi (Düşüş piyasasında Long sinyal gücünü kırar)
     if btc_state:
         if btc_state["trend"] == "bearish" and raw_score > 0:
             raw_score *= 0.5
@@ -495,7 +504,7 @@ def process_commands(state, watchlist):
 
 def get_btc_state():
     try:
-        # BTC için klines sorunsuz çalışsın diye 250 mum çekiyoruz
+        # BTC için klines sorunsuz çalışsın ve 200 EMA hesaplansın diye 250 mum çekiyoruz
         candles = fetch_klines_okx("BTC-USDT")
         if not candles or len(candles) < 200:
             return None
