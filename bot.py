@@ -21,14 +21,13 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 WATCHLIST_FILE = "watchlist.json"
-STATE_FILE = "
-
-state.json"
+STATE_FILE = "state.json"
 
 TIMEFRAME = "15m"
-PROXIMITY_PIVOT = 0.85      # %0.35'ten %0.85'e çıkardık (Pivotlara yakınlığı kolaylaştırdık)
-PROXIMITY_FIB = 1.0         # %0.5'ten %1.0'e çıkardık (Fibonacci seviyelerine toleransı artırdık)
-MIN_CONFIDENCE_TO_NOTIFY = 20 # Sinyal barajını 30'dan 20'ye düşürdük
+PROXIMITY_PIVOT = 0.85      # %0.35'ten %0.85'e esnetildi (Pivot yakalama kolaylaştırıldı)
+PROXIMITY_FIB = 1.0         # %0.5'ten %1.0'e esnetildi (Fibonacci seviye toleransı artırıldı)
+MIN_CONFIDENCE_TO_NOTIFY = 20 # Güven sınırı 30'dan 20'ye düşürüldü (Sinyal üretimi kolaylaştırıldı)
+
 
 # ============================= HTTP helpers =============================
 
@@ -204,11 +203,11 @@ def generate_signal(symbol, candles, prev_daily):
         factors.append(("EMA 50/200", "Golden Cross oluştu (yükseliş dönüşü)", 40))
     elif ema["last_cross"] == "death":
         factors.append(("EMA 50/200", "Death Cross oluştu (düşüş dönüşü)", -40))
-      else:
+    else:
+        # Trend devam ederken verilen puan 15'ten 25'e yükseltildi.
         score = 25 if ema["trend_is_bullish"] else -25
         text = "EMA50 > EMA200, trend yukarı" if ema["trend_is_bullish"] else "EMA50 < EMA200, trend aşağı"
         factors.append(("EMA 50/200", text, score))
-
 
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
