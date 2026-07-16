@@ -488,7 +488,8 @@ def save_json(path, data):
 
 
 def main():
-    watchlist = load_json(WATCHLIST_FILE, ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    # BURASI GÜNCELLENDİ: Artık doğrudan TÜM piyasayı (ALL) tarayarak başlayacak.
+    watchlist = load_json(WATCHLIST_FILE, ["ALL"])
     state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
 
     watchlist, state = process_commands(state, watchlist)
