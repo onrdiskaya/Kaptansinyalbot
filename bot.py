@@ -1,7 +1,7 @@
 """
-Kesişim Radar - "Capitano Pro" (OKX Proxy / Coğrafi Engel Aşılmış Sürüm)
+Kesişim Radar - "Capitano Pro" (OKX Geo-Bypassed Sürüm)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
-ve Kritik Mum Formasyonları (Çekiç, Yutan Boğa, Asılı Adam vb.) içeren gelişmiş tarayıcı.
+ve Kritik Mum Formasyonları içeren, GitHub Actions dostu kararlı tarayıcı.
 """
 
 import json
@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# OKX formatında pariteler (Tire ile yazılır)
+# OKX formatında pariteler
 POPULAR_USDT_SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
     "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
@@ -30,10 +30,12 @@ POPULAR_USDT_SYMBOLS = [
 TIMEFRAME = "15m"  # OKX formatı
 MIN_CONFIDENCE_TO_NOTIFY = 35
 
-# ABD IP engelini (Geo-blocking) aşmak için kullanılan güvenli OKX API köprüsü
-OKX_PROXY_BASE = "https://cors-anywhere.herokuapp.com/https://www.okx.com"
-# Alternatif olarak doğrudan çalışan yedek genel OKX API aynası (Eğer yukarıdaki çok yoğunsa bunu kullanır)
-OKX_ALT_BASE = "https://aws.okx.com"
+# GitHub Actions (ABD/Avrupa) sunucuları için coğrafi engelleri aşan resmi OKX API adresleri
+OKX_API_URLS = [
+    "https://us.okx.com",   # ABD IP'leri için resmi uç nokta
+    "https://eea.okx.com",  # Avrupa IP'leri için resmi uç nokta
+    "https://www.okx.com"   # Global uç nokta (Yedek)
+]
 
 # ============================= HTML Safe Helper =============================
 
@@ -42,18 +44,29 @@ def html_escape(text):
 
 # ============================= HTTP Helpers =============================
 
-def http_get_json(url):
+def http_get_json(path_with_query):
+    """
+    Sırasıyla ABD, Avrupa ve Global OKX API adreslerini dener. 
+    Böylece GitHub hangi ülkede olursa olsun mutlaka birine bağlanır.
+    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json"
     }
-    # Eğer istek OKX'e gidiyorsa ve doğrudan engellenme riski varsa alternatif AWS sunucusuna yönlendiriyoruz
-    if "www.okx.com" in url:
-        url = url.replace("https://www.okx.com", OKX_ALT_BASE)
-        
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode())
+    
+    last_error = None
+    for base_url in OKX_API_URLS:
+        full_url = f"{base_url}{path_with_query}"
+        try:
+            req = urllib.request.Request(full_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            last_error = e
+            # Bir adreste hata alırsak sessizce bir sonrakini dener
+            continue
+            
+    raise ConnectionError(f"Tüm OKX uç noktaları başarısız oldu. Son hata: {last_error}")
 
 
 def telegram_api(method, params=None):
@@ -66,7 +79,6 @@ def telegram_api(method, params=None):
             url = base + "?" + urllib.parse.urlencode(params)
         else:
             url = base
-        # Telegram istekleri doğrudan gider, proxy'ye ihtiyaç duymaz
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
@@ -85,17 +97,17 @@ def send_message(text):
 # ============================= OKX API Fetchers =============================
 
 def fetch_klines_okx(symbol):
-    """Bypass edilmiş OKX API'sinden kline verisi çeker."""
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=150"
+    """Farklı bölge uç noktalarını otomatik deneyerek kline verisi çeker."""
+    path = f"/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=150"
     try:
-        data = http_get_json(url)
+        data = http_get_json(path)
         if data.get("code") == "0" and data.get("data"):
             raw_list = data["data"]
         else:
-            # Spot yoksa Swap (Vadeli) paritesini dene
+            # Spot yoksa Swap (Vadeli) dene
             swap_symbol = f"{symbol}-SWAP"
-            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=150"
-            data = http_get_json(url_swap)
+            path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=150"
+            data = http_get_json(path_swap)
             if data.get("code") != "0" or not data.get("data"):
                 raise ValueError(f"OKX Hata: {data.get('msg')}")
             raw_list = data["data"]
@@ -118,15 +130,15 @@ def fetch_klines_okx(symbol):
 
 def fetch_prev_daily_okx(symbol):
     """Günlük mum verilerini çeker (Classic Pivot için)."""
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
+    path = f"/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
     try:
-        data = http_get_json(url)
+        data = http_get_json(path)
         if data.get("code") == "0" and len(data.get("data", [])) >= 2:
             raw_list = data["data"]
         else:
             swap_symbol = f"{symbol}-SWAP"
-            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
-            data = http_get_json(url_swap)
+            path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
+            data = http_get_json(path_swap)
             if data.get("code") != "0" or len(data.get("data", [])) < 2:
                 return None
             raw_list = data["data"]
@@ -144,9 +156,9 @@ def fetch_prev_daily_okx(symbol):
 def fetch_funding_rate_okx(symbol):
     """Canlı fonlama oranını çeker."""
     swap_symbol = f"{symbol}-SWAP"
-    url = f"https://www.okx.com/api/v5/public/funding-rate?instId={swap_symbol}"
+    path = f"/api/v5/public/funding-rate?instId={swap_symbol}"
     try:
-        data = http_get_json(url)
+        data = http_get_json(path)
         if data.get("code") == "0" and data.get("data"):
             return float(data["data"][0]["fundingRate"])
     except Exception:
@@ -518,7 +530,7 @@ def main():
     print(f"Piyasa Trend Filtresi (BTC): {btc_state}")
 
     symbols_to_scan = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
-    print(f"OKX (Alternatif Güvenli Sunucu) üzerinde {len(symbols_to_scan)} sembol taranıyor...")
+    print(f"OKX (Kararlı Bölge Sunucuları) üzerinde {len(symbols_to_scan)} sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
