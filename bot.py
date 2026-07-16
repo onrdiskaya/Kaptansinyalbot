@@ -1,5 +1,5 @@
 """
-Kesişim Radar - "Capitano Pro" (OKX Global Bypass Sürümü)
+Kesişim Radar - "Capitano Pro v2" (Kusursuzlaştırılmış Sürüm)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
 ve Mum Formasyonları içeren, GitHub Actions dostu kararlı tarayıcı.
 """
@@ -32,8 +32,8 @@ MIN_CONFIDENCE_TO_NOTIFY = 35
 
 # OKX'in kısıtlamasız ve engelsiz resmi global API aynaları
 OKX_API_URLS = [
-    "https://www.okx.cab",  # Cloudflare engeli olmayan resmi global ayna (Birinci Tercih)
-    "https://www.okx.com"   # Global ana sunucu (Yedek)
+    "https://www.okx.cab",  # Cloudflare engeli olmayan resmi global ayna
+    "https://www.okx.com"   # Global ana sunucu
 ]
 
 # ============================= HTML Safe Helper =============================
@@ -44,7 +44,6 @@ def html_escape(text):
 # ============================= HTTP Helpers =============================
 
 def http_get_json(path_with_query):
-    """Sırasıyla OKX global aynalarını dener."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json"
@@ -56,9 +55,7 @@ def http_get_json(path_with_query):
         try:
             req = urllib.request.Request(full_url, headers=headers)
             with urllib.request.urlopen(req, timeout=12) as resp:
-                res_data = json.loads(resp.read().decode())
-                # Eğer bağlantı kurulduysa ama OKX 'böyle bir enstrüman yok' dediyse diğer adresi denemeye gerek yok, direkt dön.
-                return res_data
+                return json.loads(resp.read().decode())
         except Exception as e:
             last_error = e
             continue
@@ -94,23 +91,29 @@ def send_message(text):
 # ============================= OKX API Fetchers =============================
 
 def fetch_klines_okx(symbol):
-    """Eksiksiz veri için global OKX API'sini sorgular."""
-    path = f"/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=150"
+    """Eksiksiz veri için global OKX API'sini sorgular. limit=250 ile EMA 200 korunur."""
+    # Spot sorgusu
+    path = f"/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=250"
     try:
         data = http_get_json(path)
         if data.get("code") == "0" and data.get("data") and len(data["data"]) > 0:
             raw_list = data["data"]
         else:
-            # Spot yoksa Swap (Vadeli) dene
-            swap_symbol = f"{symbol}-SWAP"
-            path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=150"
+            # Spot yoksa doğrudan Swap (Vadeli) dene
+            raise ValueError("Spot bulunamadı, Swap denenecek")
+    except Exception:
+        # Swap sorgusu (FTM-USDT -> FTM-USDT-SWAP)
+        swap_symbol = f"{symbol}-SWAP"
+        path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=250"
+        try:
             data = http_get_json(path_swap)
-            if data.get("code") != "0" or not data.get("data") or len(data["data"]) == 0:
-                err_msg = data.get('msg', 'Bilinmeyen Hata')
+            if data.get("code") == "0" and data.get("data") and len(data["data"]) > 0:
+                raw_list = data["data"]
+            else:
+                err_msg = data.get('msg', 'Enstrüman bulunamadı')
                 raise ValueError(f"OKX Hata: {err_msg}")
-            raw_list = data["data"]
-    except Exception as e:
-        raise ValueError(f"Veri çekme hatası ({symbol}): {e}")
+        except Exception as e:
+            raise ValueError(f"Veri çekme hatası ({symbol}): {e}")
 
     raw_list.reverse()
     candles = []
@@ -134,14 +137,17 @@ def fetch_prev_daily_okx(symbol):
         if data.get("code") == "0" and len(data.get("data", [])) >= 2:
             raw_list = data["data"]
         else:
-            swap_symbol = f"{symbol}-SWAP"
-            path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
+            raise ValueError("Spot günlük mum yok")
+    except Exception:
+        swap_symbol = f"{symbol}-SWAP"
+        path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
+        try:
             data = http_get_json(path_swap)
             if data.get("code") != "0" or len(data.get("data", [])) < 2:
                 return None
             raw_list = data["data"]
-    except Exception:
-        return None
+        except Exception:
+            return None
         
     prev_day = raw_list[1]
     return {
@@ -269,7 +275,7 @@ def analyze_candle_patterns(candles):
 # ============================= Core Signal Engine =============================
 
 def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
-    if len(candles) < 50:  # En azından EMA 50 için yeterli veri olmalı
+    if len(candles) < 50:  
         return None
 
     last = candles[-1]
@@ -281,7 +287,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     
-    # EMA 50 kesin hesaplanmalı, EMA 200 hesaplanamazsa esnek davranıp çökmeyi önlüyoruz
     if not ema50:
         return None
         
@@ -309,7 +314,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
             else:
                 factors.append(("EMA Yapısı", "Fiyat EMA kanalı içinde sıkışmış", 0))
     else:
-        # EMA 200 hesaplanamadıysa sadece EMA 50'ye göre basit yön tayini yap
         if price > e50_last:
             factors.append(("EMA Yapısı", "Fiyat EMA 50 üzerinde (Kısa Vade Pozitif)", 15))
         else:
@@ -491,6 +495,7 @@ def process_commands(state, watchlist):
 
 def get_btc_state():
     try:
+        # BTC için klines sorunsuz çalışsın diye 250 mum çekiyoruz
         candles = fetch_klines_okx("BTC-USDT")
         if not candles or len(candles) < 200:
             return None
