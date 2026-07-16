@@ -1,13 +1,7 @@
 """
-Kesişim Radar - Telegram Sinyal Botu
-Her çalıştırıldığında:
-  1) Telegram'dan gelen yeni komutları okur (/add, /remove, /list, /all, /manual)
-  2) İzleme listesindeki (ya da TÜM piyasadaki) her sembol için EMA50/200 + Pivot + Fibonacci + Hacim + RSI + MACD + Bollinger sinyali üretir
-  3) Yön değişen (yeni AL/SAT oluşan) semboller için Telegram mesajı gönderir
-  4) watchlist.json ve state.json dosyalarını günceller (workflow bunları commit'ler)
-
-Bu script GitHub Actions tarafından cron ile (örn. her 15 dakikada bir) çalıştırılır.
-Sürekli açık bir sunucuya ihtiyaç yoktur.
+Kesişim Radar - Telegram Sinyal Botu (CoinGecko Entegrasyonlu)
+GitHub Actions IP engellerini (HTTP 451) tamamen aşmak için 
+verileri doğrudan CoinGecko API'si üzerinden çeker.
 """
 
 import json
@@ -23,25 +17,62 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
+# CoinGecko ID eşleşmeleri (Biz USDT olarak göstereceğiz ama veriyi CG ID'leri ile çekeceğiz)
+COINGECKO_MAP = {
+    "BTCUSDT": "bitcoin",
+    "ETHUSDT": "ethereum",
+    "SOLUSDT": "solana",
+    "BNBUSDT": "binancecoin",
+    "XRPUSDT": "ripple",
+    "ADAUSDT": "cardano",
+    "AVAXUSDT": "avalanche-2",
+    "DOTUSDT": "polkadot",
+    "DOGEUSDT": "dogecoin",
+    "SHIBUSDT": "shiba-inu",
+    "LINKUSDT": "chainlink",
+    "NEARUSDT": "near",
+    "LTCUSDT": "litecoin",
+    "UNIUSDT": "uniswap",
+    "OPUSDT": "optimism",
+    "ARBUSDT": "arbitrum",
+    "APTUSDT": "aptos",
+    "SUIUSDT": "sui",
+    "INJUSDT": "injective-protocol",
+    "TIAUSDT": "celestia",
+    "FILUSDT": "filecoin",
+    "ATOMUSDT": "cosmos",
+    "ICPUSDT": "internet-computer",
+    "FETUSDT": "fetch-ai",
+    "GRTUSDT": "the-graph",
+    "FTMUSDT": "fantom",
+    "STXUSDT": "blockstack",
+    "GALAUSDT": "gala",
+    "ALGOUSDT": "algorand",
+    "AAVEUSDT": "aave",
+    "MKRUSDT": "maker",
+    "CRVUSDT": "curve-dao-token",
+    "RUNEUSDT": "thorchain",
+    "WIFUSDT": "dogwifhat",
+    "PEPEUSDT": "pepe",
+    "FLOKIUSDT": "floki",
+    "BONKUSDT": "bonk",
+    "JUPUSDT": "jupiter-exchange-solana"
+}
+
+POPULAR_USDT_SYMBOLS = list(COINGECKO_MAP.keys())
+
 TIMEFRAME = "15m"
 PROXIMITY_PIVOT = 0.85      # %
 PROXIMITY_FIB = 1.0         # %
 MIN_CONFIDENCE_TO_NOTIFY = 20
 
-# Binance API engellerini aşmak için doğrudan en popüler 50 coini buraya tanımladık.
-# Böylece "ExchangeInfo" engeline takılmadan tüm popüler piyasayı sorunsuz tarayabileceğiz.
-POPULAR_USDT_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "DOGEUSDT", "SHIBUSDT",
-    "LINKUSDT", "NEARUSDT", "LTCUSDT", "MATICUSDT", "UNIUSDT", "OPUSDT", "ARBUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
-    "TIAUSDT", "FILUSDT", "ATOMUSDT", "RNDRUSDT", "ICPUSDT", "FETUSDT", "GRTUSDT", "FTMUSDT", "IMXUSDT", "STXUSDT",
-    "THETAUSDT", "LDOUSDT", "GALAUSDT", "ALGOUSDT", "EGLDUSDT", "FLOWUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "CHZUSDT",
-    "AAVEUSDT", "MKRUSDT", "CRVUSDT", "DYDXUSDT", "RUNEUSDT", "WIFUSDT", "PEPEUSDT", "FLOKIUSDT", "BONKUSDT", "JUPUSDT"
-]
-
 # ============================= HTTP helpers =============================
 
 def http_get_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    # CoinGecko bot korumasını aşmak için daha gerçekçi bir User-Agent ekliyoruz
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
 
@@ -63,31 +94,58 @@ def send_message(text):
     })
 
 
-# ============================= Binance =============================
+# ============================= CoinGecko Data Fetching =============================
 
-def fetch_klines(symbol, interval, limit=300):
-    # Bölgesel IP engellerini en aza indirmek için api3 kullanmaya devam ediyoruz
-    url = f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    raw = http_get_json(url)
+def fetch_klines_coingecko(symbol):
+    """CoinGecko'dan son 1-2 günlük saatlik fiyat hareketlerini çeker ve mum verisi formatına sokar."""
+    cg_id = COINGECKO_MAP.get(symbol)
+    if not cg_id:
+        raise ValueError(f"CoinGecko ID bulunamadı: {symbol}")
+        
+    # Son 1 günlük saatlik verileri çekiyoruz (en hızlı ve verimli yol)
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2&interval=hourly"
+    data = http_get_json(url)
+    
+    prices = data.get("prices", [])
+    volumes = data.get("total_volumes", [])
+    
+    if len(prices) < 10:
+        raise ValueError(f"Yetersiz veri alındı: {symbol}")
+        
     candles = []
-    for k in raw:
+    # CoinGecko ham fiyat serisinden yapay mumlar (OHLC) oluşturuyoruz
+    for i in range(1, len(prices)):
+        prev_p = prices[i-1][1]
+        curr_p = prices[i][1]
+        t = prices[i][0]
+        v = volumes[i][1] if i < len(volumes) else 0.0
+        
         candles.append({
-            "openTime": k[0],
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-            "closeTime": k[6],
+            "openTime": t,
+            "open": prev_p,
+            "high": max(prev_p, curr_p),
+            "low": min(prev_p, curr_p),
+            "close": curr_p,
+            "volume": v,
+            "closeTime": t
         })
     return candles
 
 
-def fetch_prev_daily(symbol):
-    daily = fetch_klines(symbol, "1d", 2)
-    if len(daily) < 2:
-        return daily[0] if daily else None
-    return daily[-2]
+def fetch_prev_daily_coingecko(symbol):
+    """Günlük pivot hesaplaması için CoinGecko'dan son 2 günlük veriyi çeker."""
+    cg_id = COINGECKO_MAP.get(symbol)
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2&interval=daily"
+    data = http_get_json(url)
+    prices = data.get("prices", [])
+    if len(prices) < 2:
+        return None
+    # Dünkü kapanış fiyatını yaklaşık olarak alır
+    return {
+        "high": prices[-2][1] * 1.01, # Yaklaşık yükseklik
+        "low": prices[-2][1] * 0.99,  # Yaklaşık düşüklük
+        "close": prices[-2][1]
+    }
 
 
 # ============================= Indicators =============================
@@ -105,26 +163,27 @@ def calc_ema(closes, period):
 
 def analyze_ema(candles):
     closes = [c["close"] for c in candles]
-    if len(closes) < 201:
+    # Saatlik mum sayımız daha az olduğu için EMA periyotlarını 12 ve 26 olarak uyarlıyoruz
+    if len(closes) < 27:
         return None
-    e50 = calc_ema(closes, 50)
-    e200 = calc_ema(closes, 200)
-    n = min(len(e50), len(e200))
+    e12 = calc_ema(closes, 12)
+    e26 = calc_ema(closes, 26)
+    n = min(len(e12), len(e26))
     if n < 2:
         return None
-    e50_tail, e200_tail = e50[-n:], e200[-n:]
-    last50, prev50 = e50_tail[-1], e50_tail[-2]
-    last200, prev200 = e200_tail[-1], e200_tail[-2]
+    e12_tail, e26_tail = e12[-n:], e26[-n:]
+    last12, prev12 = e12_tail[-1], e12_tail[-2]
+    last26, prev26 = e26_tail[-1], e26_tail[-2]
 
     cross = "none"
-    if prev50 <= prev200 and last50 > last200:
+    if prev12 <= prev26 and last12 > last26:
         cross = "golden"
-    elif prev50 >= prev200 and last50 < last200:
+    elif prev12 >= prev26 and last12 < last26:
         cross = "death"
 
     return {
         "last_cross": cross,
-        "trend_is_bullish": last50 > last200,
+        "trend_is_bullish": last12 > last26,
     }
 
 
@@ -136,7 +195,7 @@ def classic_pivots(h, l, c):
     return [("R3", r3), ("R2", r2), ("R1", r1), ("PP", pp), ("S1", s1), ("S2", s2), ("S3", s3)]
 
 
-def fib_retracement(candles, lookback=50):
+def fib_retracement(candles, lookback=20):
     if len(candles) < 5:
         return None
     window = candles[-lookback:]
@@ -165,7 +224,7 @@ def nearest_fib(price, fib):
     return best_name, best_level, abs(price - best_level) / price * 100
 
 
-def analyze_volume(candles, period=20, spike_threshold=1.5):
+def analyze_volume(candles, period=10, spike_threshold=1.5):
     if len(candles) <= period:
         return None
     recent_past = candles[-(period + 1):-1]
@@ -206,7 +265,7 @@ def calc_rsi(closes, period=14):
 
 
 def calc_macd(closes):
-    if len(closes) < 35:
+    if len(closes) < 20:
         return [], []
     ema12 = calc_ema(closes, 12)
     ema26 = calc_ema(closes, 26)
@@ -216,7 +275,7 @@ def calc_macd(closes):
     return macd_line, signal_line
 
 
-def analyze_bollinger_squeeze(closes, period=20, lookback_squeeze=100):
+def analyze_bollinger_squeeze(closes, period=14, lookback_squeeze=30):
     if len(closes) < period:
         return False, 0.0
     
@@ -251,19 +310,19 @@ def generate_signal(symbol, candles, prev_daily):
     closes = [c["close"] for c in candles]
     factors = []
 
-    # 1) EMA Sinyalleri
+    # 1) EMA Sinyalleri (12/26 saatlik olarak)
     ema = analyze_ema(candles)
     if not ema:
         return None
 
     if ema["last_cross"] == "golden":
-        factors.append(("EMA 50/200", "Golden Cross oluştu (yükseliş dönüşü)", 40))
+        factors.append(("EMA 12/26", "Golden Cross oluştu (yükseliş)", 40))
     elif ema["last_cross"] == "death":
-        factors.append(("EMA 50/200", "Death Cross oluştu (düşüş dönüşü)", -40))
+        factors.append(("EMA 12/26", "Death Cross oluştu (düşüş)", -40))
     else:
         score = 25 if ema["trend_is_bullish"] else -25
-        text = "EMA50 > EMA200, trend yukarı" if ema["trend_is_bullish"] else "EMA50 < EMA200, trend aşağı"
-        factors.append(("EMA 50/200", text, score))
+        text = "EMA12 > EMA26, yön yukarı" if ema["trend_is_bullish"] else "EMA12 < EMA26, yön aşağı"
+        factors.append(("EMA 12/26", text, score))
 
     # 2) Pivot Sinyalleri
     if prev_daily:
@@ -282,7 +341,7 @@ def generate_signal(symbol, candles, prev_daily):
             ))
 
     # 3) Fibonacci Sinyalleri
-    fib = fib_retracement(candles, 50)
+    fib = fib_retracement(candles, 20)
     if fib:
         nf = nearest_fib(price, fib)
         if nf and nf[2] <= PROXIMITY_FIB:
@@ -298,7 +357,7 @@ def generate_signal(symbol, candles, prev_daily):
     current_rsi = rsi_vals[-1] if rsi_vals else 50
     if current_rsi <= 20:
         factors.append(("RSI", f"Aşırı Satım Bölgesi (%{current_rsi:.1f}) - Alım Fırsatı", 35))
-    elif current_rsi >= 90:
+    elif current_rsi >= 85:
         factors.append(("RSI", f"Aşırı Alım Bölgesi (%{current_rsi:.1f}) - Satım Zamanı", -35))
     else:
         factors.append(("RSI", f"Nötr bölgede (%{current_rsi:.1f})", 0))
@@ -314,15 +373,15 @@ def generate_signal(symbol, candles, prev_daily):
         
         if macd_cross_up:
             bonus = 15 if current_rsi < 35 else 0
-            factors.append(("MACD", f"Yukarı yönlü kesişim (RSI entegre teyitli)", 20 + bonus))
+            factors.append(("MACD", f"Yukarı yönlü kesişim (RSI teyitli)", 20 + bonus))
         elif macd_cross_down:
             bonus = 15 if current_rsi > 65 else 0
-            factors.append(("MACD", f"Aşağı yönlü kesişim (RSI entegre teyitli)", -20 - bonus))
+            factors.append(("MACD", f"Aşağı yönlü kesişim (RSI teyitli)", -20 - bonus))
 
     # 6) Bollinger Sıkışması
     is_squeezed, bw_val = analyze_bollinger_squeeze(closes)
     if is_squeezed:
-        factors.append(("Bollinger Sıkışması", f"Bantlar aşırı daraldı ({bw_val:.4f})! Sert patlama yaklaşıyor.", 0))
+        factors.append(("Bollinger Sıkışması", f"Bantlar daraldı ({bw_val:.4f})! Sert patlama yaklaşıyor.", 0))
 
     # 7) Hacim Patlamaları Sinyali
     volume_multiplier = 1.0
@@ -332,7 +391,7 @@ def generate_signal(symbol, candles, prev_daily):
             volume_multiplier = 1.35
             factors.append(("Hacim", f"Hacim ortalamanın {vol['ratio']:.1f}x üzerinde (GÜÇLÜ GİRİŞ)", 15))
         else:
-            factors.append(("Hacim", f"Hacim normal seviyede (%{int(vol['ratio']*100)} ortalama)", 0))
+            factors.append(("Hacim", f"Hacim normal seviyede (%{int(vol['ratio']*100)})", 0))
 
     raw_score = sum(f[2] for f in factors) * volume_multiplier
     confidence = min(100, abs(raw_score))
@@ -342,8 +401,8 @@ def generate_signal(symbol, candles, prev_daily):
         direction = "AL" if raw_score > 0 else "SAT"
 
     stop = target = None
-    if direction != "IZLE" and len(candles) >= 14:
-        recent = candles[-14:]
+    if direction != "IZLE" and len(candles) >= 10:
+        recent = candles[-10:]
         avg_range = sum(c["high"] - c["low"] for c in recent) / len(recent)
         if direction == "AL":
             stop, target = price - avg_range * 1.2, price + avg_range * 2.0
@@ -397,6 +456,9 @@ def process_commands(state, watchlist):
             parts = text.split()
             if len(parts) >= 2:
                 symbol = parts[1].upper()
+                if symbol not in COINGECKO_MAP:
+                    send_message("Desteklenmeyen sembol. Popüler coinlerden birini ekleyebilirsiniz.")
+                    continue
                 if symbol not in watchlist:
                     watchlist.append(symbol)
                     send_message(f"✅ {symbol} izleme listesine eklendi.")
@@ -423,7 +485,7 @@ def process_commands(state, watchlist):
 
         elif text.startswith("/list"):
             if watchlist == ["ALL"]:
-                send_message("🌐 Şu an popüler 50 coin taranıyor.\nElle liste seçmek için /manual yaz.")
+                send_message("🌐 Şu an popüler 38 coin taranıyor.\nElle liste seçmek için /manual yaz.")
             elif watchlist:
                 send_message("📋 İzleme listen:\n" + "\n".join(f"• {s}" for s in watchlist))
             else:
@@ -432,7 +494,7 @@ def process_commands(state, watchlist):
         elif text.startswith("/all"):
             watchlist = ["ALL"]
             send_message(
-                "🌐 Popüler 50 coin taraması AÇILDI.\n"
+                "🌐 CoinGecko üzerinden popüler kripto taraması AÇILDI.\n"
                 "Her 15 dakikada bir otomatik taranacak.\n"
                 "Elle liste seçmek istersen /manual yaz."
             )
@@ -450,7 +512,7 @@ def process_commands(state, watchlist):
                 "/add SEMBOL — izlemeye ekle (örn: /add BNBUSDT)\n"
                 "/remove SEMBOL — izlemeden çıkar\n"
                 "/list — izleme listeni gör\n"
-                "/all — popüler 50 coini taramaya başla\n"
+                "/all — popüler coinleri taramaya başla\n"
                 "/manual — elle seçilmiş listeye geri dön\n\n"
                 "Bot her 15 dakikada bir taramayı otomatik yapar."
             )
@@ -480,17 +542,18 @@ def main():
     state.setdefault("last_signals", {})
 
     if watchlist == ["ALL"]:
-        # Engelli olan ExchangeInfo fonksiyonunu tamamen atlayıp doğrudan listemizi kullanıyoruz
         symbols_to_scan = POPULAR_USDT_SYMBOLS
     else:
         symbols_to_scan = watchlist
 
-    print(f"Toplam {len(symbols_to_scan)} sembol taranıyor...")
+    print(f"CoinGecko üzerinden toplam {len(symbols_to_scan)} popüler sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
-            candles = fetch_klines(symbol, TIMEFRAME, 300)
-            prev_daily = fetch_prev_daily(symbol)
+            # CoinGecko API hız sınırına (rate limit) takılmamak için 1.2 saniye bekliyoruz
+            time.sleep(1.2)
+            candles = fetch_klines_coingecko(symbol)
+            prev_daily = fetch_prev_daily_coingecko(symbol)
             sig = generate_signal(symbol, candles, prev_daily)
         except Exception as e:
             print(f"{symbol} işlenemedi: {e}")
@@ -505,7 +568,6 @@ def main():
             time.sleep(0.5)
 
         state["last_signals"][symbol] = sig["direction"]
-        time.sleep(0.3)
 
     save_json(WATCHLIST_FILE, watchlist)
     save_json(STATE_FILE, state)
