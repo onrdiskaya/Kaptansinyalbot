@@ -1,7 +1,6 @@
 """
-Kesişim Radar - Telegram Sinyal Botu (CoinGecko Entegrasyonlu - Hata Korumalı)
-GitHub Actions IP engellerini tamamen aşmak için verileri CoinGecko üzerinden çeker.
-Herhangi bir API veya Telegram hatasında botun durmasını engellemek için tüm bloklar zırhlandırılmıştır.
+Kesişim Radar - Telegram Sinyal Botu (Bybit Entegrasyonlu - Kesintisiz Sürüm)
+IP engellerini ve rate-limit (429) sorunlarını aşmak için veri sağlayıcı olarak Bybit kullanır.
 """
 
 import json
@@ -17,60 +16,32 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# CoinGecko ID eşleşmeleri
-COINGECKO_MAP = {
-    "BTCUSDT": "bitcoin",
-    "ETHUSDT": "ethereum",
-    "SOLUSDT": "solana",
-    "BNBUSDT": "binancecoin",
-    "XRPUSDT": "ripple",
-    "ADAUSDT": "cardano",
-    "AVAXUSDT": "avalanche-2",
-    "DOTUSDT": "polkadot",
-    "DOGEUSDT": "dogecoin",
-    "SHIBUSDT": "shiba-inu",
-    "LINKUSDT": "chainlink",
-    "NEARUSDT": "near",
-    "LTCUSDT": "litecoin",
-    "UNIUSDT": "uniswap",
-    "OPUSDT": "optimism",
-    "ARBUSDT": "arbitrum",
-    "APTUSDT": "aptos",
-    "SUIUSDT": "sui",
-    "INJUSDT": "injective-protocol",
-    "TIAUSDT": "celestia",
-    "FILUSDT": "filecoin",
-    "ATOMUSDT": "cosmos",
-    "ICPUSDT": "internet-computer",
-    "FETUSDT": "fetch-ai",
-    "GRTUSDT": "the-graph",
-    "FTMUSDT": "fantom",
-    "STXUSDT": "blockstack",
-    "GALAUSDT": "gala",
-    "ALGOUSDT": "algorand",
-    "AAVEUSDT": "aave",
-    "MKRUSDT": "maker",
-    "CRVUSDT": "curve-dao-token",
-    "RUNEUSDT": "thorchain",
-    "WIFUSDT": "dogwifhat",
-    "PEPEUSDT": "pepe",
-    "FLOKIUSDT": "floki",
-    "BONKUSDT": "bonk",
-    "JUPUSDT": "jupiter-exchange-solana"
-}
+# Taranacak popüler çiftler (Bybit üzerindeki USDT çiftleri)
+POPULAR_USDT_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", 
+    "DOTUSDT", "DOGEUSDT", "SHIBUSDT", "LINKUSDT", "NEARUSDT", "LTCUSDT", "UNIUSDT", 
+    "OPUSDT", "ARBUSDT", "APTUSDT", "SUIUSDT", "INJUSDT", "TIAUSDT", "FILUSDT", 
+    "ATOMUSDT", "ICPUSDT", "FETUSDT", "GRTUSDT", "FTMUSDT", "STXUSDT", "GALAUSDT", 
+    "ALGOUSDT", "AAVEUSDT", "MKRUSDT", "CRVUSDT", "RUNEUSDT", "WIFUSDT", "PEPEUSDT", 
+    "FLOKIUSDT", "BONKUSDT", "JUPUSDT"
+]
 
-POPULAR_USDT_SYMBOLS = list(COINGECKO_MAP.keys())
-
-TIMEFRAME = "15m"
+TIMEFRAME = "15"  # Bybit için 15 dakika
 PROXIMITY_PIVOT = 0.85      # %
 PROXIMITY_FIB = 1.0         # %
 MIN_CONFIDENCE_TO_NOTIFY = 20
 
-# ============================= HTTP helpers =============================
+# ============================= HTML Safe Helper =============================
+
+def html_escape(text):
+    """Telegram mesajlarında HTML etiket hatası (400 Bad Request) almamak için metni temizler."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+# ============================= HTTP Helpers =============================
 
 def http_get_json(url):
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     })
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
@@ -100,53 +71,58 @@ def send_message(text):
     })
 
 
-# ============================= CoinGecko Data Fetching =============================
+# ============================= Bybit Data Fetching =============================
 
-def fetch_klines_coingecko(symbol):
-    cg_id = COINGECKO_MAP.get(symbol)
-    if not cg_id:
-        raise ValueError(f"CoinGecko ID bulunamadı: {symbol}")
-        
-    # days=5 saatlik veri çekmek için en kararlı parametredir (API 400 hatasını önler)
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=5"
+def fetch_klines_bybit(symbol):
+    """Bybit v5 API'sini kullanarak son mum verilerini çeker."""
+    # 15m timeframe için son 100 mumu çekeriz (indikatörler için fazlasıyla yeterli)
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={TIMEFRAME}&limit=100"
     data = http_get_json(url)
     
-    prices = data.get("prices", [])
-    volumes = data.get("total_volumes", [])
+    if data.get("retCode") != 0:
+        raise ValueError(f"Bybit API Hatası: {data.get('retMsg')}")
+        
+    raw_list = data.get("result", {}).get("list", [])
+    if not raw_list:
+        raise ValueError(f"{symbol} için mum verisi alınamadı.")
+        
+    # Bybit verileri yeniden eskiye doğru verir (en yeni mum listenin başındadır).
+    # Bizim kodumuzun çalışması için eskiden yeniye sıralıyoruz.
+    raw_list.reverse()
     
-    if len(prices) < 10:
-        raise ValueError(f"Yetersiz veri alındı: {symbol}")
-        
     candles = []
-    for i in range(1, len(prices)):
-        prev_p = prices[i-1][1]
-        curr_p = prices[i][1]
-        t = prices[i][0]
-        v = volumes[i][1] if i < len(volumes) else 0.0
-        
+    for item in raw_list:
+        # Bybit kline formatı: [start_time, open, high, low, close, volume, turnover]
         candles.append({
-            "openTime": t,
-            "open": prev_p,
-            "high": max(prev_p, curr_p),
-            "low": min(prev_p, curr_p),
-            "close": curr_p,
-            "volume": v,
-            "closeTime": t
+            "openTime": int(item[0]),
+            "open": float(item[1]),
+            "high": float(item[2]),
+            "low": float(item[3]),
+            "close": float(item[4]),
+            "volume": float(item[5]),
+            "closeTime": int(item[0]) + 900000 # 15 dakika ekle
         })
     return candles
 
 
-def fetch_prev_daily_coingecko(symbol):
-    cg_id = COINGECKO_MAP.get(symbol)
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=5"
+def fetch_prev_daily_bybit(symbol):
+    """Bybit üzerinden bir önceki günün Günlük mum (D) verilerini çeker (Pivot için)."""
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval=D&limit=2"
     data = http_get_json(url)
-    prices = data.get("prices", [])
-    if len(prices) < 2:
+    
+    if data.get("retCode") != 0:
         return None
+        
+    raw_list = data.get("result", {}).get("list", [])
+    if len(raw_list) < 2:
+        return None
+        
+    # Listenin 0. elemanı bugünün devam eden mumu, 1. elemanı dün kapanan mumdur.
+    prev_day = raw_list[1]
     return {
-        "high": prices[-2][1] * 1.01,
-        "low": prices[-2][1] * 0.99,
-        "close": prices[-2][1]
+        "high": float(prev_day[2]),
+        "low": float(prev_day[3]),
+        "close": float(prev_day[4])
     }
 
 
@@ -418,16 +394,25 @@ def generate_signal(symbol, candles, prev_daily):
 
 def format_signal_message(sig):
     emoji = {"AL": "🟢", "SAT": "🔴", "IZLE": "🟡"}[sig["direction"]]
+    
+    # HTML formatlama hatalarını önlemek için değişkenleri temizliyoruz (escape)
+    sym = html_escape(sig['symbol'])
+    dir_str = html_escape(sig['direction'])
+    conf_val = int(sig['confidence'])
+    price_val = sig['price']
+    
     lines = [
-        f"{emoji} <b>{sig['symbol']}</b> — {sig['direction']} (güven %{int(sig['confidence'])})",
-        f"Fiyat: ${sig['price']:.4f}" if sig["price"] < 1 else f"Fiyat: ${sig['price']:.2f}",
+        f"{emoji} <b>{sym}</b> — {dir_str} (güven %{conf_val})",
+        f"Fiyat: ${price_val:.4f}" if price_val < 1 else f"Fiyat: ${price_val:.2f}",
     ]
     if sig["stop"] and sig["target"]:
         lines.append(f"⛔ Stop: ${sig['stop']:.2f}   🎯 Hedef: ${sig['target']:.2f}")
     lines.append("")
     for name, detail, score in sig["factors"]:
         arrow = "↑" if score > 0 else ("↓" if score < 0 else "•")
-        lines.append(f"{arrow} <b>{name}</b>: {detail}")
+        escaped_name = html_escape(name)
+        escaped_detail = html_escape(detail)
+        lines.append(f"{arrow} <b>{escaped_name}</b>: {escaped_detail}")
     return "\n".join(lines)
 
 
@@ -457,7 +442,7 @@ def process_commands(state, watchlist):
             parts = text.split()
             if len(parts) >= 2:
                 symbol = parts[1].upper()
-                if symbol not in COINGECKO_MAP:
+                if symbol not in POPULAR_USDT_SYMBOLS:
                     send_message("Desteklenmeyen sembol. Popüler coinlerden birini ekleyebilirsiniz.")
                     continue
                 if symbol not in watchlist:
@@ -486,7 +471,7 @@ def process_commands(state, watchlist):
 
         elif text.startswith("/list"):
             if watchlist == ["ALL"]:
-                send_message("🌐 Şu an popüler 38 coin taranıyor.\nElle liste seçmek için /manual yaz.")
+                send_message("🌐 Şu an popüler Bybit coinleri taranıyor.\nElle liste seçmek için /manual yaz.")
             elif watchlist:
                 send_message("📋 İzleme listen:\n" + "\n".join(f"• {s}" for s in watchlist))
             else:
@@ -495,7 +480,7 @@ def process_commands(state, watchlist):
         elif text.startswith("/all"):
             watchlist = ["ALL"]
             send_message(
-                "🌐 CoinGecko üzerinden popüler kripto taraması AÇILDI.\n"
+                "🌐 Bybit üzerinden popüler kripto taraması AÇILDI.\n"
                 "Her 15 dakikada bir otomatik taranacak.\n"
                 "Elle liste seçmek istersen /manual yaz."
             )
@@ -545,7 +530,6 @@ def main():
     watchlist = ["ALL"]
     state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
 
-    # Telegram komutlarını güvenli bir şekilde işle
     try:
         watchlist, state = process_commands(state, watchlist)
     except Exception as e:
@@ -558,14 +542,15 @@ def main():
     else:
         symbols_to_scan = watchlist
 
-    print(f"CoinGecko üzerinden toplam {len(symbols_to_scan)} popüler sembol taranıyor...")
+    print(f"Bybit üzerinden toplam {len(symbols_to_scan)} popüler sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
-            # Sıkışıklığı ve API banını önlemek için bekleme süresi
-            time.sleep(2.0)
-            candles = fetch_klines_coingecko(symbol)
-            prev_daily = fetch_prev_daily_coingecko(symbol)
+            # Bybit çok hızlı cevap verse de sunucuyu yormamak için ufak bir bekleme (0.2sn)
+            time.sleep(0.2)
+            
+            candles = fetch_klines_bybit(symbol)
+            prev_daily = fetch_prev_daily_bybit(symbol)
             sig = generate_signal(symbol, candles, prev_daily)
             
             if not sig:
@@ -579,7 +564,6 @@ def main():
             state["last_signals"][symbol] = sig["direction"]
             
         except Exception as e:
-            # HATA KORUMASI: Bir coin'de istek patlarsa asla botu çökertme, logla ve sıradakine geç!
             print(f"⚠️ {symbol} işlenirken hata oluştu (atlandı): {e}")
             continue
 
