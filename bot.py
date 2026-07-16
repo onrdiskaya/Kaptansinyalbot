@@ -1,7 +1,7 @@
 """
-Kesişim Radar - Telegram Sinyal Botu (OKX + Otomatik SWAP Geçişli Kesintisiz Sürüm)
-GitHub Actions IP engellerini (403) aşmak için OKX kullanır. 
-Spotta listeli olmayan coinleri otomatik olarak Vadeli (Swap) marketinden çeker.
+Kesişim Radar - "Capitano Pro" Sürümü
+EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate (Fonlama),
+ve Kritik Mum Formasyonları (Çekiç, Yutan Boğa, Asılı Adam vb.) içeren gelişmiş tarayıcı.
 """
 
 import json
@@ -17,7 +17,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# Taranacak popüler çiftler (OKX üzerindeki USDT spot çiftleri)
 POPULAR_USDT_SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
     "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
@@ -27,22 +26,20 @@ POPULAR_USDT_SYMBOLS = [
     "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
-TIMEFRAME = "15m"  # OKX için 15 dakika kline parametresi
+TIMEFRAME = "15m"
 PROXIMITY_PIVOT = 0.85      # %
-PROXIMITY_FIB = 1.0         # %
-MIN_CONFIDENCE_TO_NOTIFY = 20
+MIN_CONFIDENCE_TO_NOTIFY = 35
 
 # ============================= HTML Safe Helper =============================
 
 def html_escape(text):
-    """Telegram mesajlarında HTML etiket hatası almamak için metni temizler."""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 # ============================= HTTP Helpers =============================
 
 def http_get_json(url):
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     })
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
@@ -50,7 +47,7 @@ def http_get_json(url):
 
 def telegram_api(method, params=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram token veya Chat ID eksik!")
+        print("⚠️ Telegram API ayarları eksik!")
         return {}
     try:
         base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
@@ -60,7 +57,7 @@ def telegram_api(method, params=None):
             url = base
         return http_get_json(url)
     except Exception as e:
-        print(f"⚠️ Telegram API Hatası ({method}): {e}")
+        print(f"⚠️ Telegram API Hatası: {e}")
         return {}
 
 
@@ -71,21 +68,18 @@ def send_message(text):
         "parse_mode": "HTML",
     })
 
-
-# ============================= OKX Data Fetching =============================
+# ============================= OKX API Fetchers =============================
 
 def fetch_klines_okx(symbol):
     """OKX v5 API'sinden mum verilerini çeker. Spot yoksa otomatik Swap (Vadeli) dener."""
-    # Önce standart Spot olarak dene (örn: BTC-USDT)
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=100"
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=150"
     try:
         data = http_get_json(url)
         if data.get("code") == "0" and data.get("data"):
             raw_list = data["data"]
         else:
-            # Spotta yoksa otomatik SWAP olarak dene (örn: FTM-USDT-SWAP)
             swap_symbol = f"{symbol}-SWAP"
-            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=100"
+            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=150"
             data = http_get_json(url_swap)
             if data.get("code") != "0" or not data.get("data"):
                 raise ValueError(f"OKX API Hatası: {data.get('msg')}")
@@ -93,9 +87,7 @@ def fetch_klines_okx(symbol):
     except Exception as e:
         raise ValueError(f"Veri çekme hatası: {e}")
 
-    # OKX verileri en yeni mumdan en eskiye doğru verir. Eskiden yeniye sıralıyoruz.
     raw_list.reverse()
-    
     candles = []
     for item in raw_list:
         candles.append({
@@ -105,20 +97,18 @@ def fetch_klines_okx(symbol):
             "low": float(item[3]),
             "close": float(item[4]),
             "volume": float(item[5]),
-            "closeTime": int(item[0]) + 900000
         })
     return candles
 
 
 def fetch_prev_daily_okx(symbol):
-    """OKX üzerinden bir önceki günün Günlük mum verilerini çeker. Spot yoksa Swap dener."""
+    """Günlük mum verilerini çeker (Classic Pivot için)."""
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
     try:
         data = http_get_json(url)
         if data.get("code") == "0" and len(data.get("data", [])) >= 2:
             raw_list = data["data"]
         else:
-            # Spotta dünün mumu yoksa SWAP olarak dene
             swap_symbol = f"{symbol}-SWAP"
             url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
             data = http_get_json(url_swap)
@@ -136,7 +126,20 @@ def fetch_prev_daily_okx(symbol):
     }
 
 
-# ============================= Indicators =============================
+def fetch_funding_rate_okx(symbol):
+    """OKX Swap piyasasından canlı fonlama oranını çeker."""
+    swap_symbol = f"{symbol}-SWAP"
+    url = f"https://www.okx.com/api/v5/public/funding-rate?instId={swap_symbol}"
+    try:
+        data = http_get_json(url)
+        if data.get("code") == "0" and data.get("data"):
+            # Örn: 0.0001 (%0.01) olarak döner
+            return float(data["data"][0]["fundingRate"])
+    except Exception:
+        pass
+    return 0.0
+
+# ============================= Technical Indicators =============================
 
 def calc_ema(closes, period):
     if len(closes) < period:
@@ -147,80 +150,6 @@ def calc_ema(closes, period):
     for price in closes[period:]:
         out.append(price * k + out[-1] * (1 - k))
     return out
-
-
-def analyze_ema(candles):
-    closes = [c["close"] for c in candles]
-    if len(closes) < 27:
-        return None
-    e12 = calc_ema(closes, 12)
-    e26 = calc_ema(closes, 26)
-    n = min(len(e12), len(e26))
-    if n < 2:
-        return None
-    e12_tail, e26_tail = e12[-n:], e26[-n:]
-    last12, prev12 = e12_tail[-1], e12_tail[-2]
-    last26, prev26 = e26_tail[-1], e26_tail[-2]
-
-    cross = "none"
-    if prev12 <= prev26 and last12 > last26:
-        cross = "golden"
-    elif prev12 >= prev26 and last12 < last26:
-        cross = "death"
-
-    return {
-        "last_cross": cross,
-        "trend_is_bullish": last12 > last26,
-    }
-
-
-def classic_pivots(h, l, c):
-    pp = (h + l + c) / 3
-    r1, s1 = 2 * pp - l, 2 * pp - h
-    r2, s2 = pp + (h - l), pp - (h - l)
-    r3, s3 = h + 2 * (pp - l), l - 2 * (h - pp)
-    return [("R3", r3), ("R2", r2), ("R1", r1), ("PP", pp), ("S1", s1), ("S2", s2), ("S3", s3)]
-
-
-def fib_retracement(candles, lookback=20):
-    if len(candles) < 5:
-        return None
-    window = candles[-lookback:]
-    high_c = max(window, key=lambda c: c["high"])
-    low_c = min(window, key=lambda c: c["low"])
-    high, low = high_c["high"], low_c["low"]
-    is_uptrend = low_c["openTime"] < high_c["openTime"]
-    diff = high - low
-    ratios = [("0.0", 0), ("0.236", 0.236), ("0.382", 0.382), ("0.5", 0.5),
-              ("0.618", 0.618), ("0.786", 0.786), ("1.0", 1.0)]
-    levels = []
-    for name, r in ratios:
-        price = (high - diff * r) if is_uptrend else (low + diff * r)
-        levels.append((name, price))
-    return {"is_uptrend": is_uptrend, "levels": levels}
-
-
-def nearest_fib(price, fib):
-    best_name, best_level, best_dist = None, None, float("inf")
-    for name, level in fib["levels"]:
-        d = abs(level - price)
-        if d < best_dist:
-            best_dist, best_name, best_level = d, name, level
-    if best_name is None:
-        return None
-    return best_name, best_level, abs(price - best_level) / price * 100
-
-
-def analyze_volume(candles, period=10, spike_threshold=1.5):
-    if len(candles) <= period:
-        return None
-    recent_past = candles[-(period + 1):-1]
-    avg = sum(c["volume"] for c in recent_past) / len(recent_past)
-    if avg <= 0:
-        return None
-    current = candles[-1]["volume"]
-    ratio = current / avg
-    return {"ratio": ratio, "is_spike": ratio >= spike_threshold}
 
 
 def calc_rsi(closes, period=14):
@@ -262,56 +191,112 @@ def calc_macd(closes):
     return macd_line, signal_line
 
 
-def analyze_bollinger_squeeze(closes, period=14, lookback_squeeze=30):
-    if len(closes) < period:
-        return False, 0.0
-    
-    bandwidths = []
-    for i in range(len(closes) - lookback_squeeze, len(closes)):
-        if i < period:
-            continue
-        window = closes[i-period:i]
-        sma = sum(window) / period
-        variance = sum((x - sma) ** 2 for x in window) / period
-        std_dev = variance ** 0.5
-        upper = sma + (2 * std_dev)
-        lower = sma - (2 * std_dev)
-        bandwidth = (upper - lower) / sma if sma != 0 else 0
-        bandwidths.append(bandwidth)
-        
-    if not bandwidths:
-        return False, 0.0
-        
-    current_bw = bandwidths[-1]
-    sorted_bws = sorted(bandwidths)
-    threshold = sorted_bws[int(len(sorted_bws) * 0.15)]
-    
-    return current_bw <= threshold, current_bw
+def classic_pivots(h, l, c):
+    pp = (h + l + c) / 3
+    r1, s1 = 2 * pp - l, 2 * pp - h
+    r2, s2 = pp + (h - l), pp - (h - l)
+    r3, s3 = h + 2 * (pp - l), l - 2 * (h - pp)
+    return [("R3", r3), ("R2", r2), ("R1", r1), ("PP", pp), ("S1", s1), ("S2", s2), ("S3", s3)]
 
 
-# ============================= Signal Engine =============================
+# ============================= Candlestick Patterns (Mum Formasyonları) =============================
 
-def generate_signal(symbol, candles, prev_daily):
+def analyze_candle_patterns(candles):
+    """En önemli yön belirleyen mum formasyonlarını tespit eder."""
+    if len(candles) < 3:
+        return None, 0
+
+    c1 = candles[-2]  # Bir önceki mum
+    c2 = candles[-1]  # En son (canlı/yeni kapanmış) mum
+
+    # Mum gövde ve fitil boyutları hesaplama
+    def get_parts(c):
+        body = abs(c["close"] - c["open"])
+        high_shadow = c["high"] - max(c["open"], c["close"])
+        low_shadow = min(c["open"], c["close"]) - c["low"]
+        total = c["high"] - c["low"]
+        is_bull = c["close"] >= c["open"]
+        return body, high_shadow, low_shadow, total, is_bull
+
+    b2, hs2, ls2, t2, bull2 = get_parts(c2)
+    b1, hs1, ls1, t1, bull1 = get_parts(c1)
+
+    # 1) YUTAN BOĞA (Bullish Engulfing)
+    if not bull1 and bull2 and c2["close"] > c1["open"] and c2["open"] < c1["close"]:
+        return "Yutan Boğa (Bullish Engulfing) 🟢", 30
+
+    # 2) YUTAN AYI (Bearish Engulfing)
+    if bull1 and not bull2 and c2["close"] < c1["open"] and c2["open"] > c1["close"]:
+        return "Yutan Ayı (Bearish Engulfing) 🔴", -30
+
+    # 3) ÇEKİÇ (Hammer) - Dip Dönüşü
+    if t2 > 0 and (ls2 >= 2 * b2) and (hs2 <= 0.1 * t2):
+        if bull2:
+            return "Çekiç (Hammer) 🟢", 25
+        else:
+            return "Ters Çekiç (Inverted Hammer) 🟡", 15
+
+    # 4) KAYAN YILDIZ (Shooting Star) / ASILI ADAM (Hanging Man) - Tepe Dönüşü
+    if t2 > 0 and (hs2 >= 2 * b2) and (ls2 <= 0.1 * t2):
+        if not bull2:
+            return "Kayan Yıldız (Shooting Star) 🔴", -25
+        else:
+            return "Asılı Adam (Hanging Man) 🔴", -20
+
+    return None, 0
+
+
+# ============================= Core Signal Engine =============================
+
+def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
     last = candles[-1]
     price = last["close"]
     closes = [c["close"] for c in candles]
     factors = []
-
-    # 1) EMA Sinyalleri
-    ema = analyze_ema(candles)
-    if not ema:
+    
+    if len(closes) < 200:
         return None
 
-    if ema["last_cross"] == "golden":
-        factors.append(("EMA 12/26", "Golden Cross oluştu (yükseliş)", 40))
-    elif ema["last_cross"] == "death":
-        factors.append(("EMA 12/26", "Death Cross oluştu (düşüş)", -40))
-    else:
-        score = 25 if ema["trend_is_bullish"] else -25
-        text = "EMA12 > EMA26, yön yukarı" if ema["trend_is_bullish"] else "EMA12 < EMA26, yön aşağı"
-        factors.append(("EMA 12/26", text, score))
+    # 1) EMA 50 ve 200 Analizi
+    ema50 = calc_ema(closes, 50)
+    ema200 = calc_ema(closes, 200)
+    
+    if not ema50 or not ema200:
+        return None
+        
+    e50_last, e50_prev = ema50[-1], ema50[-2]
+    e200_last, e200_prev = ema200[-1], ema200[-2]
+    
+    # Trend Yönü Tayini
+    trend_up = e50_last > e200_last
+    
+    # EMA Kesişim Kontrolü
+    ema_cross = "none"
+    if e50_prev <= e200_prev and e50_last > e200_last:
+        ema_cross = "golden"
+    elif e50_prev >= e200_prev and e50_last < e200_last:
+        ema_cross = "death"
 
-    # 2) Pivot Sinyalleri
+    # EMA Puanlaması
+    if ema_cross == "golden":
+        factors.append(("EMA 50/200", "Golden Cross Kesişimi Gerçekleşti 🚀", 50))
+    elif ema_cross == "death":
+        factors.append(("EMA 50/200", "Death Cross Kesişimi Gerçekleşti 💀", -50))
+    else:
+        # Fiyatın EMA'ların neresinde kapattığı önemli
+        if price > e50_last and price > e200_last:
+            factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 üzerinde (Güçlü Alıcı)", 25))
+        elif price < e50_last and price < e200_last:
+            factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 altında (Güçlü Satıcı)", -25))
+        else:
+            factors.append(("EMA Yapısı", "Fiyat EMA kanalı içinde sıkışmış", 0))
+
+    # 2) Mum Formasyonu (Price Action) Analizi
+    pattern_name, pattern_score = analyze_candle_patterns(candles)
+    if pattern_name:
+        factors.append(("Mum Formasyonu", f"{pattern_name} tespit edildi", pattern_score))
+
+    # 3) Pivot Sıkışması ve Analizi
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = None, float("inf")
@@ -319,122 +304,120 @@ def generate_signal(symbol, candles, prev_daily):
             dist = abs(price - level) / level * 100
             if dist < nearest_dist:
                 nearest_dist, nearest_name = dist, name
-        if nearest_name and nearest_dist <= PROXIMITY_PIVOT:
-            is_support = nearest_name.startswith("S") or nearest_name == "PP"
-            factors.append((
-                "Pivot",
-                f"Fiyat {nearest_name} seviyesine çok yakın (%{nearest_dist:.2f})",
-                25 if is_support else -25,
-            ))
+                
+        # PP Üstü/Altı Kontrolü
+        pp_level = [v for k, v in pivots if k == "PP"][0]
+        is_above_pp = price > pp_level
+        
+        # Sıkışma Kontrolü (Pivotlar birbirine daralmış mı?)
+        r3_level = [v for k, v in pivots if k == "R3"][0]
+        s3_level = [v for k, v in pivots if k == "S3"][0]
+        pivot_range_pct = (r3_level - s3_level) / pp_level * 100
+        
+        pivot_detail = f"Fiyat PP üzerinde. {nearest_name} yakınlarında (%{nearest_dist:.2f})" if is_above_pp else f"Fiyat PP altında. {nearest_name} yakınlarında (%{nearest_dist:.2f})"
+        pivot_score = 15 if is_above_pp else -15
+        
+        if pivot_range_pct < 2.5: # Daralan pivot (Patlama Habercisi)
+            pivot_detail += " | Pivot Aralığı Aşırı Daraldı (PATLAMA YAKIN) 💥"
+            pivot_score *= 1.3
+            
+        factors.append(("Pivot Analizi", pivot_detail, int(pivot_score)))
 
-    # 3) Fibonacci Sinyalleri
-    fib = fib_retracement(candles, 20)
-    if fib:
-        nf = nearest_fib(price, fib)
-        if nf and nf[2] <= PROXIMITY_FIB:
-            name, _level, _dist = nf
-            factors.append((
-                "Fibonacci",
-                f"Fiyat %{name} seviyesine yakın ({'destek' if fib['is_uptrend'] else 'direnç'})",
-                20 if fib["is_uptrend"] else -20,
-            ))
-
-    # 4) RSI Sinyalleri
+    # 4) RSI Analizi (Dipten Kafayı Kaldırdı mı?)
     rsi_vals = calc_rsi(closes)
-    current_rsi = rsi_vals[-1] if rsi_vals else 50
-    if current_rsi <= 20:
-        factors.append(("RSI", f"Aşırı Satım Bölgesi (%{current_rsi:.1f}) - Alım Fırsatı", 35))
-    elif current_rsi >= 85:
-        factors.append(("RSI", f"Aşırı Alım Bölgesi (%{current_rsi:.1f}) - Satım Zamanı", -35))
-    else:
-        factors.append(("RSI", f"Nötr bölgede (%{current_rsi:.1f})", 0))
+    if rsi_vals:
+        curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
+        if curr_rsi <= 25:
+            factors.append(("RSI", f"Aşırı Satım Bölgesi (%{curr_rsi:.1f})", 20))
+        elif prev_rsi < 30 and curr_rsi > prev_rsi:
+            factors.append(("RSI", f"Dipten Kafayı Yukarı Kaldırdı (%{curr_rsi:.1f}) 📈", 30))
+        elif curr_rsi >= 75:
+            factors.append(("RSI", f"Aşırı Alım Bölgesi (%{curr_rsi:.1f})", -20))
+        elif prev_rsi > 70 and curr_rsi < prev_rsi:
+            factors.append(("RSI", f"Tepeden Aşağı Dönüyor (%{curr_rsi:.1f}) 📉", -30))
+        else:
+            factors.append(("RSI", f"Nötr bölgede (%{curr_rsi:.1f})", 0))
 
-    # 5) MACD & RSI Entegrasyon Sinyalleri
+    # 5) MACD Analizi
     macd_line, signal_line = calc_macd(closes)
     if len(macd_line) >= 2 and len(signal_line) >= 2:
         prev_macd, last_macd = macd_line[-2], macd_line[-1]
         prev_sig, last_sig = signal_line[-2], signal_line[-1]
-        
-        macd_cross_up = prev_macd <= prev_sig and last_macd > last_sig
-        macd_cross_down = prev_macd >= prev_sig and last_macd < last_sig
-        
-        if macd_cross_up:
-            bonus = 15 if current_rsi < 35 else 0
-            factors.append(("MACD", f"Yukarı yönlü kesişim (RSI teyitli)", 20 + bonus))
-        elif macd_cross_down:
-            bonus = 15 if current_rsi > 65 else 0
-            factors.append(("MACD", f"Aşağı yönlü kesişim (RSI teyitli)", -20 - bonus))
+        if prev_macd <= prev_sig and last_macd > last_sig:
+            factors.append(("MACD", "Aşağıdan Yukarı Kesti (AL) 🟢", 20))
+        elif prev_macd >= prev_sig and last_macd < last_sig:
+            factors.append(("MACD", "Yukarıdan Aşağı Kesti (SAT) 🔴", -20))
 
-    # 6) Bollinger Sıkışması
-    is_squeezed, bw_val = analyze_bollinger_squeeze(closes)
-    if is_squeezed:
-        factors.append(("Bollinger Sıkışması", f"Bantlar daraldı ({bw_val:.4f})! Sert patlama yaklaşıyor.", 0))
-
-    # 7) Hacim Patlamaları Sinyali
-    volume_multiplier = 1.0
-    vol = analyze_volume(candles)
-    if vol:
-        if vol["is_spike"]:
-            volume_multiplier = 1.35
-            factors.append(("Hacim", f"Hacim ortalamanın {vol['ratio']:.1f}x üzerinde (GÜÇLÜ GİRİŞ)", 15))
+    # 6) Fonlama Oranı (Funding Rate) Analizi
+    if funding_rate != 0.0:
+        # Aşırı yüksek pozitif fonlama (%0.05 ve üzeri) longları patlatmak isteyebilirler
+        if funding_rate >= 0.0005:
+            factors.append(("Funding Rate", f"Yüksek Fonlama (%{funding_rate*100:.3f}) - Long Squeeze Riski! ⚠️", -15))
+        # Aşırı negatif fonlama shortları patlatmak isteyebilirler
+        elif funding_rate <= -0.0005:
+            factors.append(("Funding Rate", f"Yüksek Negatif (%{funding_rate*100:.3f}) - Short Squeeze Riski! 🚀", 15))
         else:
-            factors.append(("Hacim", f"Hacim normal seviyede (%{int(vol['ratio']*100)})", 0))
+            factors.append(("Funding Rate", f"Dengeli (%{funding_rate*100:.4f})", 0))
 
-    raw_score = sum(f[2] for f in factors) * volume_multiplier
+    # Puanlama Toplamı
+    raw_score = sum(f[2] for f in factors)
+    
+    # 7) BTC Trend Filtresi Uygulaması
+    if btc_state:
+        if btc_state["trend"] == "bearish" and raw_score > 0:
+            raw_score *= 0.5  # BTC ayı ise long sinyal gücünü yarı yarıya düşür
+            factors.append(("Piyasa Etkisi (BTC)", "BTC düşüş trendinde olduğu için sinyal gücü kırıldı.", 0))
+        elif btc_state["trend"] == "bullish" and raw_score < 0:
+            raw_score *= 0.5  # BTC boğa ise short sinyal gücünü yarı yarıya düşür
+
     confidence = min(100, abs(raw_score))
-
+    
     direction = "IZLE"
     if confidence >= MIN_CONFIDENCE_TO_NOTIFY:
         direction = "AL" if raw_score > 0 else "SAT"
 
-    stop = target = None
-    if direction != "IZLE" and len(candles) >= 10:
-        recent = candles[-10:]
-        avg_range = sum(c["high"] - c["low"] for c in recent) / len(recent)
-        if direction == "AL":
-            stop, target = price - avg_range * 1.2, price + avg_range * 2.0
-        else:
-            stop, target = price + avg_range * 1.2, price - avg_range * 2.0
-
     return {
         "symbol": symbol, "direction": direction, "confidence": confidence,
-        "price": price, "factors": factors, "stop": stop, "target": target,
+        "price": price, "factors": factors, "funding": funding_rate
     }
 
 
 def format_signal_message(sig):
-    emoji = {"AL": "🟢", "SAT": "🔴", "IZLE": "🟡"}[sig["direction"]]
-    
-    # OKX formatındaki "BTC-USDT" ifadesini okunabilirlik için "BTCUSDT"ye dönüştürüyoruz
+    emoji = {"AL": "🟢 [LONG ADAYI]", "SAT": "🔴 [SHORT ADAYI]", "IZLE": "🟡"}[sig["direction"]]
     clean_symbol = sig['symbol'].replace("-", "")
     sym = html_escape(clean_symbol)
-    dir_str = html_escape(sig['direction'])
-    conf_val = int(sig['confidence'])
     price_val = sig['price']
+    conf = int(sig['confidence'])
     
     lines = [
-        f"{emoji} <b>{sym}</b> — {dir_str} (güven %{conf_val})",
-        f"Fiyat: ${price_val:.4f}" if price_val < 1 else f"Fiyat: ${price_val:.2f}",
+        f"{emoji} <b>#{sym}</b>",
+        f"<b>Anlık Fiyat:</b> ${price_val:.4f}" if price_val < 1 else f"<b>Anlık Fiyat:</b> ${price_val:.2f}",
+        f"<b>Sinyal Güveni:</b> %{conf}",
+        f"<b>Canlı Fonlama Oranı:</b> %{sig['funding']*100:.4f}",
+        "---",
+        "<b>🔎 CAPITANO ANALİZ RAPORU:</b>"
     ]
-    if sig["stop"] and sig["target"]:
-        lines.append(f"⛔ Stop: ${sig['stop']:.2f}   🎯 Hedef: ${sig['target']:.2f}")
-    lines.append("")
+    
     for name, detail, score in sig["factors"]:
-        arrow = "↑" if score > 0 else ("↓" if score < 0 else "•")
-        escaped_name = html_escape(name)
-        escaped_detail = html_escape(detail)
-        lines.append(f"{arrow} <b>{escaped_name}</b>: {escaped_detail}")
+        if score > 0:
+            arrow = "✅"
+        elif score < 0:
+            arrow = "❌"
+        else:
+            arrow = "•"
+        lines.append(f"{arrow} <b>{html_escape(name)}:</b> {html_escape(detail)}")
+        
+    lines.append("\n⚠️ <i>Grafiğini açıp mutlaka Price Action teyidi al Onur!</i>")
     return "\n".join(lines)
 
 
-# ============================= Telegram command handling =============================
+# ============================= Command & Flow Management =============================
 
 def process_commands(state, watchlist):
     offset = state.get("last_update_id", 0) + 1
     try:
         updates = telegram_api("getUpdates", {"offset": offset, "timeout": 0})
-    except Exception as e:
-        print("⚠️ getUpdates çağrısı başarısız oldu:", e)
+    except Exception:
         return watchlist, state
 
     results = updates.get("result", [])
@@ -446,30 +429,24 @@ def process_commands(state, watchlist):
         if chat_id != str(TELEGRAM_CHAT_ID):
             continue
 
-        # Gelen komutlarda tire (-) karakterini kullanıcıdan beklememek için temizlik yapıyoruz
         clean_text = text.replace("USDT", "-USDT") if "USDT" in text and "-" not in text else text
 
         if clean_text.startswith("/add"):
             if watchlist == ["ALL"]:
-                send_message("Şu an TÜM piyasa taranıyor, tekil ekleme geçersiz. Önce /manual yaz.")
+                send_message("Şu an TÜM piyasa taranıyor. Önce /manual yaz.")
                 continue
             parts = clean_text.split()
             if len(parts) >= 2:
                 symbol = parts[1].upper()
-                if symbol not in POPULAR_USDT_SYMBOLS:
-                    send_message("Desteklenmeyen sembol. Popüler coinlerden birini ekleyebilirsiniz.")
-                    continue
                 if symbol not in watchlist:
                     watchlist.append(symbol)
                     send_message(f"✅ {symbol.replace('-', '')} izleme listesine eklendi.")
-                else:
-                    send_message(f"{symbol.replace('-', '')} zaten listede.")
             else:
                 send_message("Kullanım: /add BTCUSDT")
 
         elif clean_text.startswith("/remove"):
             if watchlist == ["ALL"]:
-                send_message("Şu an TÜM piyasa taranıyor, tekil çıkarma geçersiz. Önce /manual yaz.")
+                send_message("Şu an TÜM piyasa taranıyor. Önce /manual yaz.")
                 continue
             parts = clean_text.split()
             if len(parts) >= 2:
@@ -478,49 +455,41 @@ def process_commands(state, watchlist):
                     watchlist.remove(symbol)
                     state.get("last_signals", {}).pop(symbol, None)
                     send_message(f"🗑 {symbol.replace('-', '')} listeden çıkarıldı.")
-                else:
-                    send_message(f"{symbol.replace('-', '')} listede değil.")
             else:
                 send_message("Kullanım: /remove BTCUSDT")
 
         elif text.startswith("/list"):
             if watchlist == ["ALL"]:
-                send_message("🌐 Şu an popüler OKX coinleri taranıyor.\nElle liste seçmek için /manual yaz.")
-            elif watchlist:
-                send_message("📋 İzleme listen:\n" + "\n".join(f"• {s.replace('-', '')}" for s in watchlist))
+                send_message("🌐 Şu an tüm OKX popüler coinleri taranıyor.")
             else:
-                send_message("İzleme listen boş. /add BTCUSDT ile ekleyebilirsin.")
+                send_message("📋 İzleme listen:\n" + "\n".join(f"• {s.replace('-', '')}" for s in watchlist))
 
         elif text.startswith("/all"):
             watchlist = ["ALL"]
-            send_message(
-                "🌐 OKX üzerinden popüler kripto taraması AÇILDI.\n"
-                "Her 15 dakikada bir otomatik taranacak.\n"
-                "Elle liste seçmek istersen /manual yaz."
-            )
+            send_message("🌐 Tüm popüler OKX coinleri tarama moduna geçildi.")
 
         elif text.startswith("/manual"):
-            if watchlist == ["ALL"]:
-                watchlist = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
-                send_message("📋 Elle liste moduna dönüldü. Varsayılan: BTCUSDT, ETHUSDT, SOLUSDT.\n/add ve /remove ile düzenleyebilirsin.")
-            else:
-                send_message("Zaten elle liste modundasın.")
-
-        elif text.startswith("/start") or text.startswith("/help"):
-            send_message(
-                "👋 Kesişim Radar botuna hoş geldin.\n\n"
-                "/add SEMBOL — izlemeye ekle (örn: /add BNBUSDT)\n"
-                "/remove SEMBOL — izlemeden çıkar\n"
-                "/list — izleme listeni gör\n"
-                "/all — popüler coinleri taramaya başla\n"
-                "/manual — elle seçilmiş listeye geri dön\n\n"
-                "Bot her 15 dakikada bir taramayı otomatik yapar."
-            )
+            watchlist = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+            send_message("📋 Elle liste moduna geçildi. Varsayılan: BTC, ETH, SOL.")
 
     return watchlist, state
 
 
-# ============================= Main =============================
+def get_btc_state():
+    """Taramadan önce BTC-USDT durumunu analiz eder."""
+    try:
+        candles = fetch_klines_okx("BTC-USDT")
+        closes = [c["close"] for c in candles]
+        ema200 = calc_ema(closes, 200)
+        if closes[-1] > ema200[-1]:
+            return {"trend": "bullish", "price": closes[-1]}
+        else:
+            return {"trend": "bearish", "price": closes[-1]}
+    except Exception:
+        return None
+
+
+# ============================= Main Pipeline =============================
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -536,8 +505,8 @@ def save_json(path, data):
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ Dosya kaydedilirken hata oluştu ({path}): {e}")
+    except Exception:
+        pass
 
 
 def main():
@@ -546,26 +515,27 @@ def main():
 
     try:
         watchlist, state = process_commands(state, watchlist)
-    except Exception as e:
-        print("⚠️ Komutlar işlenirken hata oluştu:", e)
+    except Exception:
+        pass
 
     state.setdefault("last_signals", {})
 
-    if watchlist == ["ALL"]:
-        symbols_to_scan = POPULAR_USDT_SYMBOLS
-    else:
-        symbols_to_scan = watchlist
+    # Tarama öncesi BTC durumunu al
+    btc_state = get_btc_state()
+    print(f"Piyasa Trend Filtresi (BTC): {btc_state}")
 
-    print(f"OKX üzerinden toplam {len(symbols_to_scan)} popüler sembol taranıyor...")
+    symbols_to_scan = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
+    print(f"OKX üzerinde {len(symbols_to_scan)} sembol Capitano Pro algoritmalarıyla taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
-            # OKX istek limitlerine takılmamak için hafif bir bekleme ekliyoruz
             time.sleep(0.3)
             
             candles = fetch_klines_okx(symbol)
             prev_daily = fetch_prev_daily_okx(symbol)
-            sig = generate_signal(symbol, candles, prev_daily)
+            funding_rate = fetch_funding_rate_okx(symbol)
+            
+            sig = generate_signal(symbol, candles, prev_daily, btc_state, funding_rate)
             
             if not sig:
                 continue
@@ -578,7 +548,7 @@ def main():
             state["last_signals"][symbol] = sig["direction"]
             
         except Exception as e:
-            print(f"⚠️ {symbol} işlenirken hata oluştu (atlandı): {e}")
+            print(f"⚠️ {symbol} taranırken hata: {e}")
             continue
 
     save_json(WATCHLIST_FILE, watchlist)
