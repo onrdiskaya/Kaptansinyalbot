@@ -28,6 +28,15 @@ PROXIMITY_PIVOT = 0.85      # %
 PROXIMITY_FIB = 1.0         # %
 MIN_CONFIDENCE_TO_NOTIFY = 20
 
+# Binance API engellerini aşmak için doğrudan en popüler 50 coini buraya tanımladık.
+# Böylece "ExchangeInfo" engeline takılmadan tüm popüler piyasayı sorunsuz tarayabileceğiz.
+POPULAR_USDT_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "DOGEUSDT", "SHIBUSDT",
+    "LINKUSDT", "NEARUSDT", "LTCUSDT", "MATICUSDT", "UNIUSDT", "OPUSDT", "ARBUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
+    "TIAUSDT", "FILUSDT", "ATOMUSDT", "RNDRUSDT", "ICPUSDT", "FETUSDT", "GRTUSDT", "FTMUSDT", "IMXUSDT", "STXUSDT",
+    "THETAUSDT", "LDOUSDT", "GALAUSDT", "ALGOUSDT", "EGLDUSDT", "FLOWUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "CHZUSDT",
+    "AAVEUSDT", "MKRUSDT", "CRVUSDT", "DYDXUSDT", "RUNEUSDT", "WIFUSDT", "PEPEUSDT", "FLOKIUSDT", "BONKUSDT", "JUPUSDT"
+]
 
 # ============================= HTTP helpers =============================
 
@@ -57,7 +66,7 @@ def send_message(text):
 # ============================= Binance =============================
 
 def fetch_klines(symbol, interval, limit=300):
-    # NOT: GitHub IP engellerini aşmak için api3.binance.com adresini kullanıyoruz
+    # Bölgesel IP engellerini en aza indirmek için api3 kullanmaya devam ediyoruz
     url = f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     raw = http_get_json(url)
     candles = []
@@ -79,28 +88,6 @@ def fetch_prev_daily(symbol):
     if len(daily) < 2:
         return daily[0] if daily else None
     return daily[-2]
-
-
-def fetch_all_usdt_symbols():
-    """Binance'de işlem gören tüm USDT paritelerini döner.
-    Kaldıraçlı token'lar (UP/DOWN/BULL/BEAR) ve stablecoin çiftleri hariç tutulur."""
-    # NOT: Engeli aşmak için api3.binance.com adresini kullanıyoruz
-    info = http_get_json("https://api3.binance.com/api/v3/exchangeInfo")
-    excluded_words = ["UP", "DOWN", "BULL", "BEAR"]
-    stable_bases = {"USDC", "FDUSD", "TUSD", "DAI", "BUSD", "EUR", "GBP", "TRY", "USDP", "PAX", "UST", "USTC"}
-    symbols = []
-    for s in info.get("symbols", []):
-        if s.get("quoteAsset") != "USDT":
-            continue
-        if s.get("status") != "TRADING":
-            continue
-        base = s.get("baseAsset", "")
-        if any(w in base for w in excluded_words):
-            continue
-        if base in stable_bases:
-            continue
-        symbols.append(s["symbol"])
-    return sorted(symbols)
 
 
 # ============================= Indicators =============================
@@ -155,7 +142,7 @@ def fib_retracement(candles, lookback=50):
     window = candles[-lookback:]
     high_c = max(window, key=lambda c: c["high"])
     low_c = min(window, key=lambda c: c["low"])
-    high, low = high_c["high"], look_low = low_c["low"], low_c["low"]
+    high, low = high_c["high"], low_c["low"]
     is_uptrend = low_c["openTime"] < high_c["openTime"]
     diff = high - low
     ratios = [("0.0", 0), ("0.236", 0.236), ("0.382", 0.382), ("0.5", 0.5),
@@ -251,7 +238,7 @@ def analyze_bollinger_squeeze(closes, period=20, lookback_squeeze=100):
         
     current_bw = bandwidths[-1]
     sorted_bws = sorted(bandwidths)
-    threshold = sorted_bws[int(len(sorted_bws) * 0.15)] # En dar %15'lik dilim sıkışma kabul edilir
+    threshold = sorted_bws[int(len(sorted_bws) * 0.15)]
     
     return current_bw <= threshold, current_bw
 
@@ -306,7 +293,7 @@ def generate_signal(symbol, candles, prev_daily):
                 20 if fib["is_uptrend"] else -20,
             ))
 
-    # 4) RSI Sinyalleri (20 altı AL / 90 üstü SAT)
+    # 4) RSI Sinyalleri
     rsi_vals = calc_rsi(closes)
     current_rsi = rsi_vals[-1] if rsi_vals else 50
     if current_rsi <= 20:
@@ -436,7 +423,7 @@ def process_commands(state, watchlist):
 
         elif text.startswith("/list"):
             if watchlist == ["ALL"]:
-                send_message("🌐 Şu an TÜM piyasa (Binance USDT çiftleri) taranıyor.\nElle liste seçmek için /manual yaz.")
+                send_message("🌐 Şu an popüler 50 coin taranıyor.\nElle liste seçmek için /manual yaz.")
             elif watchlist:
                 send_message("📋 İzleme listen:\n" + "\n".join(f"• {s}" for s in watchlist))
             else:
@@ -445,9 +432,8 @@ def process_commands(state, watchlist):
         elif text.startswith("/all"):
             watchlist = ["ALL"]
             send_message(
-                "🌐 Tüm piyasa taraması AÇILDI.\n"
-                "Artık Binance'deki tüm USDT çiftleri her 15 dakikada bir taranacak.\n"
-                "İlk taramada mevcut sinyali olan tüm semboller için mesaj gelebilir — bu normal.\n"
+                "🌐 Popüler 50 coin taraması AÇILDI.\n"
+                "Her 15 dakikada bir otomatik taranacak.\n"
                 "Elle liste seçmek istersen /manual yaz."
             )
 
@@ -464,10 +450,9 @@ def process_commands(state, watchlist):
                 "/add SEMBOL — izlemeye ekle (örn: /add BNBUSDT)\n"
                 "/remove SEMBOL — izlemeden çıkar\n"
                 "/list — izleme listeni gör\n"
-                "/all — TÜM piyasayı taramaya başla\n"
+                "/all — popüler 50 coini taramaya başla\n"
                 "/manual — elle seçilmiş listeye geri dön\n\n"
-                "Bot her 15 dakikada bir taramayı otomatik yapar, "
-                "yeni bir AL/SAT sinyali oluşunca sana buradan haber verir."
+                "Bot her 15 dakikada bir taramayı otomatik yapar."
             )
 
     return watchlist, state
@@ -488,7 +473,6 @@ def save_json(path, data):
 
 
 def main():
-    # Başlangıçta tüm piyasayı (ALL) taraması için sabitlendi
     watchlist = ["ALL"]
     state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
 
@@ -496,13 +480,12 @@ def main():
     state.setdefault("last_signals", {})
 
     if watchlist == ["ALL"]:
-        try:
-            symbols_to_scan = fetch_all_usdt_symbols()
-        except Exception as e:
-            print("Tüm piyasa listesi çekilemedi:", e)
-            symbols_to_scan = []
+        # Engelli olan ExchangeInfo fonksiyonunu tamamen atlayıp doğrudan listemizi kullanıyoruz
+        symbols_to_scan = POPULAR_USDT_SYMBOLS
     else:
         symbols_to_scan = watchlist
+
+    print(f"Toplam {len(symbols_to_scan)} sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
