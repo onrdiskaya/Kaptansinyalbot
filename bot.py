@@ -1,7 +1,7 @@
 """
-Kesişim Radar - Telegram Sinyal Botu (CoinGecko Entegrasyonlu)
-GitHub Actions IP engellerini (HTTP 451) tamamen aşmak için 
-verileri doğrudan CoinGecko API'si üzerinden çeker.
+Kesişim Radar - Telegram Sinyal Botu (CoinGecko Entegrasyonlu - Hata Korumalı)
+GitHub Actions IP engellerini tamamen aşmak için verileri CoinGecko üzerinden çeker.
+Herhangi bir API hatasında botun durmasını engellemek için try-except blokları güçlendirilmiştir.
 """
 
 import json
@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# CoinGecko ID eşleşmeleri (Biz USDT olarak göstereceğiz ama veriyi CG ID'leri ile çekeceğiz)
+# CoinGecko ID eşleşmeleri
 COINGECKO_MAP = {
     "BTCUSDT": "bitcoin",
     "ETHUSDT": "ethereum",
@@ -69,7 +69,6 @@ MIN_CONFIDENCE_TO_NOTIFY = 20
 # ============================= HTTP helpers =============================
 
 def http_get_json(url):
-    # CoinGecko bot korumasını aşmak için daha gerçekçi bir User-Agent ekliyoruz
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
@@ -97,13 +96,12 @@ def send_message(text):
 # ============================= CoinGecko Data Fetching =============================
 
 def fetch_klines_coingecko(symbol):
-    """CoinGecko'dan son 1-2 günlük saatlik fiyat hareketlerini çeker ve mum verisi formatına sokar."""
     cg_id = COINGECKO_MAP.get(symbol)
     if not cg_id:
         raise ValueError(f"CoinGecko ID bulunamadı: {symbol}")
         
-    # Son 1 günlük saatlik verileri çekiyoruz (en hızlı ve verimli yol)
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2&interval=hourly"
+    # Bad Request hatasını çözmek için sadeleştirilmiş parametreler kullanıyoruz
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2"
     data = http_get_json(url)
     
     prices = data.get("prices", [])
@@ -113,7 +111,6 @@ def fetch_klines_coingecko(symbol):
         raise ValueError(f"Yetersiz veri alındı: {symbol}")
         
     candles = []
-    # CoinGecko ham fiyat serisinden yapay mumlar (OHLC) oluşturuyoruz
     for i in range(1, len(prices)):
         prev_p = prices[i-1][1]
         curr_p = prices[i][1]
@@ -133,17 +130,16 @@ def fetch_klines_coingecko(symbol):
 
 
 def fetch_prev_daily_coingecko(symbol):
-    """Günlük pivot hesaplaması için CoinGecko'dan son 2 günlük veriyi çeker."""
     cg_id = COINGECKO_MAP.get(symbol)
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2&interval=daily"
+    # Günlük mum için parametre düzeltildi
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2"
     data = http_get_json(url)
     prices = data.get("prices", [])
     if len(prices) < 2:
         return None
-    # Dünkü kapanış fiyatını yaklaşık olarak alır
     return {
-        "high": prices[-2][1] * 1.01, # Yaklaşık yükseklik
-        "low": prices[-2][1] * 0.99,  # Yaklaşık düşüklük
+        "high": prices[-2][1] * 1.01,
+        "low": prices[-2][1] * 0.99,
         "close": prices[-2][1]
     }
 
@@ -163,7 +159,6 @@ def calc_ema(closes, period):
 
 def analyze_ema(candles):
     closes = [c["close"] for c in candles]
-    # Saatlik mum sayımız daha az olduğu için EMA periyotlarını 12 ve 26 olarak uyarlıyoruz
     if len(closes) < 27:
         return None
     e12 = calc_ema(closes, 12)
@@ -310,7 +305,7 @@ def generate_signal(symbol, candles, prev_daily):
     closes = [c["close"] for c in candles]
     factors = []
 
-    # 1) EMA Sinyalleri (12/26 saatlik olarak)
+    # 1) EMA Sinyalleri
     ema = analyze_ema(candles)
     if not ema:
         return None
@@ -529,6 +524,13 @@ def load_json(path, default):
     return default
 
 
+def load_json(path, default):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -550,13 +552,14 @@ def main():
 
     for symbol in symbols_to_scan:
         try:
-            # CoinGecko API hız sınırına (rate limit) takılmamak için 1.2 saniye bekliyoruz
-            time.sleep(1.2)
+            # CoinGecko ücretsiz API rate-limit sınırı için bekleme süresi
+            time.sleep(1.5)
             candles = fetch_klines_coingecko(symbol)
             prev_daily = fetch_prev_daily_coingecko(symbol)
             sig = generate_signal(symbol, candles, prev_daily)
         except Exception as e:
-            print(f"{symbol} işlenemedi: {e}")
+            # HATA KORUMASI: Bir coin hata verirse botu durdurma, log yaz ve sıradakine geç.
+            print(f"⚠️ {symbol} işlenirken hata oluştu (atlandı): {e}")
             continue
 
         if not sig:
