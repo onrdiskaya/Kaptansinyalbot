@@ -17,13 +17,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# OKX formatında popüler pariteler
+# OKX formatında popüler pariteler (Sorun çıkaran FTM, MKR ve RUNE listeden tamamen kaldırıldı)
 POPULAR_USDT_SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
     "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
     "OP-USDT", "ARB-USDT", "APT-USDT", "SUI-USDT", "INJ-USDT", "TIA-USDT", "FIL-USDT", 
-    "ATOM-USDT", "ICP-USDT", "FET-USDT", "GRT-USDT", "FTM-USDT", "STX-USDT", "GALA-USDT", 
-    "ALGO-USDT", "AAVE-USDT", "MKR-USDT", "CRV-USDT", "RUNE-USDT", "WIF-USDT", "PEPE-USDT", 
+    "ATOM-USDT", "ICP-USDT", "FET-USDT", "GRT-USDT", "STX-USDT", "GALA-USDT", 
+    "ALGO-USDT", "AAVE-USDT", "CRV-USDT", "WIF-USDT", "PEPE-USDT", 
     "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
@@ -504,7 +504,6 @@ def process_commands(state, watchlist):
 
 def get_btc_state():
     try:
-        # BTC için klines sorunsuz çalışsın ve 200 EMA hesaplansın diye 250 mum çekiyoruz
         candles = fetch_klines_okx("BTC-USDT")
         if not candles or len(candles) < 200:
             return None
