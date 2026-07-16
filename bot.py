@@ -57,7 +57,8 @@ def send_message(text):
 # ============================= Binance =============================
 
 def fetch_klines(symbol, interval, limit=300):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    # NOT: GitHub IP engellerini aşmak için api3.binance.com adresini kullanıyoruz
+    url = f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     raw = http_get_json(url)
     candles = []
     for k in raw:
@@ -83,7 +84,8 @@ def fetch_prev_daily(symbol):
 def fetch_all_usdt_symbols():
     """Binance'de işlem gören tüm USDT paritelerini döner.
     Kaldıraçlı token'lar (UP/DOWN/BULL/BEAR) ve stablecoin çiftleri hariç tutulur."""
-    info = http_get_json("https://api.binance.com/api/v3/exchangeInfo")
+    # NOT: Engeli aşmak için api3.binance.com adresini kullanıyoruz
+    info = http_get_json("https://api3.binance.com/api/v3/exchangeInfo")
     excluded_words = ["UP", "DOWN", "BULL", "BEAR"]
     stable_bases = {"USDC", "FDUSD", "TUSD", "DAI", "BUSD", "EUR", "GBP", "TRY", "USDP", "PAX", "UST", "USTC"}
     symbols = []
@@ -153,7 +155,7 @@ def fib_retracement(candles, lookback=50):
     window = candles[-lookback:]
     high_c = max(window, key=lambda c: c["high"])
     low_c = min(window, key=lambda c: c["low"])
-    high, low = high_c["high"], low_c["low"]
+    high, low = high_c["high"], look_low = low_c["low"], low_c["low"]
     is_uptrend = low_c["openTime"] < high_c["openTime"]
     diff = high - low
     ratios = [("0.0", 0), ("0.236", 0.236), ("0.382", 0.382), ("0.5", 0.5),
@@ -324,15 +326,13 @@ def generate_signal(symbol, candles, prev_daily):
         macd_cross_down = prev_macd >= prev_sig and last_macd < last_sig
         
         if macd_cross_up:
-            # RSI Dipteyken gelen MACD Al sinyali katmerli güçlüdür
             bonus = 15 if current_rsi < 35 else 0
             factors.append(("MACD", f"Yukarı yönlü kesişim (RSI entegre teyitli)", 20 + bonus))
         elif macd_cross_down:
-            # RSI Tepedeyken gelen MACD Sat sinyali katmerli güçlüdür
             bonus = 15 if current_rsi > 65 else 0
             factors.append(("MACD", f"Aşağı yönlü kesişim (RSI entegre teyitli)", -20 - bonus))
 
-    # 6) Bollinger Sıkışması (Ayrı Sinyal/Bilgi Olarak)
+    # 6) Bollinger Sıkışması
     is_squeezed, bw_val = analyze_bollinger_squeeze(closes)
     if is_squeezed:
         factors.append(("Bollinger Sıkışması", f"Bantlar aşırı daraldı ({bw_val:.4f})! Sert patlama yaklaşıyor.", 0))
@@ -342,7 +342,7 @@ def generate_signal(symbol, candles, prev_daily):
     vol = analyze_volume(candles)
     if vol:
         if vol["is_spike"]:
-            volume_multiplier = 1.35  # Güçlü hacimde skoru çarparak sinyali güçlendiririz
+            volume_multiplier = 1.35
             factors.append(("Hacim", f"Hacim ortalamanın {vol['ratio']:.1f}x üzerinde (GÜÇLÜ GİRİŞ)", 15))
         else:
             factors.append(("Hacim", f"Hacim normal seviyede (%{int(vol['ratio']*100)} ortalama)", 0))
@@ -488,8 +488,8 @@ def save_json(path, data):
 
 
 def main():
-    # BURASI GÜNCELLENDİ: Artık doğrudan TÜM piyasayı (ALL) tarayarak başlayacak.
-    watchlist = load_json(WATCHLIST_FILE, ["ALL"])
+    # Başlangıçta tüm piyasayı (ALL) taraması için sabitlendi
+    watchlist = ["ALL"]
     state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
 
     watchlist, state = process_commands(state, watchlist)
