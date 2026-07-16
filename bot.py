@@ -1,6 +1,7 @@
 """
-Kesişim Radar - Telegram Sinyal Botu (OKX Entegrasyonlu - Kesintisiz Sürüm)
-GitHub Actions IP engellerini (403 Forbidden) aşmak için en stabil büyük borsa olan OKX API'sini kullanır.
+Kesişim Radar - Telegram Sinyal Botu (OKX + Otomatik SWAP Geçişli Kesintisiz Sürüm)
+GitHub Actions IP engellerini (403) aşmak için OKX kullanır. 
+Spotta listeli olmayan coinleri otomatik olarak Vadeli (Swap) marketinden çeker.
 """
 
 import json
@@ -74,24 +75,29 @@ def send_message(text):
 # ============================= OKX Data Fetching =============================
 
 def fetch_klines_okx(symbol):
-    """OKX v5 API'sini kullanarak son mum verilerini çeker."""
-    # OKX public kline url'i
+    """OKX v5 API'sinden mum verilerini çeker. Spot yoksa otomatik Swap (Vadeli) dener."""
+    # Önce standart Spot olarak dene (örn: BTC-USDT)
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=100"
-    data = http_get_json(url)
-    
-    if data.get("code") != "0":
-        raise ValueError(f"OKX API Hatası: {data.get('msg')}")
-        
-    raw_list = data.get("data", [])
-    if not raw_list:
-        raise ValueError(f"{symbol} için mum verisi alınamadı.")
-        
+    try:
+        data = http_get_json(url)
+        if data.get("code") == "0" and data.get("data"):
+            raw_list = data["data"]
+        else:
+            # Spotta yoksa otomatik SWAP olarak dene (örn: FTM-USDT-SWAP)
+            swap_symbol = f"{symbol}-SWAP"
+            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=100"
+            data = http_get_json(url_swap)
+            if data.get("code") != "0" or not data.get("data"):
+                raise ValueError(f"OKX API Hatası: {data.get('msg')}")
+            raw_list = data["data"]
+    except Exception as e:
+        raise ValueError(f"Veri çekme hatası: {e}")
+
     # OKX verileri en yeni mumdan en eskiye doğru verir. Eskiden yeniye sıralıyoruz.
     raw_list.reverse()
     
     candles = []
     for item in raw_list:
-        # OKX kline formatı: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
         candles.append({
             "openTime": int(item[0]),
             "open": float(item[1]),
@@ -105,18 +111,23 @@ def fetch_klines_okx(symbol):
 
 
 def fetch_prev_daily_okx(symbol):
-    """OKX üzerinden bir önceki günün Günlük mum (1Dutc) verilerini çeker (Pivot için)."""
+    """OKX üzerinden bir önceki günün Günlük mum verilerini çeker. Spot yoksa Swap dener."""
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
-    data = http_get_json(url)
-    
-    if data.get("code") != "0":
+    try:
+        data = http_get_json(url)
+        if data.get("code") == "0" and len(data.get("data", [])) >= 2:
+            raw_list = data["data"]
+        else:
+            # Spotta dünün mumu yoksa SWAP olarak dene
+            swap_symbol = f"{symbol}-SWAP"
+            url_swap = f"https://www.okx.com/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
+            data = http_get_json(url_swap)
+            if data.get("code") != "0" or len(data.get("data", [])) < 2:
+                return None
+            raw_list = data["data"]
+    except Exception:
         return None
         
-    raw_list = data.get("data", [])
-    if len(raw_list) < 2:
-        return None
-        
-    # OKX'te 0. indeks bugünün mumu, 1. indeks dünün tamamlanmış mumudur.
     prev_day = raw_list[1]
     return {
         "high": float(prev_day[2]),
