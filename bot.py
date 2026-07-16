@@ -1,7 +1,7 @@
 """
-Kesişim Radar - "Capitano Pro" (OKX Geo-Bypassed Sürüm)
+Kesişim Radar - "Capitano Pro" (OKX Global Bypass Sürümü)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
-ve Kritik Mum Formasyonları içeren, GitHub Actions dostu kararlı tarayıcı.
+ve Mum Formasyonları içeren, GitHub Actions dostu kararlı tarayıcı.
 """
 
 import json
@@ -27,14 +27,13 @@ POPULAR_USDT_SYMBOLS = [
     "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
-TIMEFRAME = "15m"  # OKX formatı
+TIMEFRAME = "15m"
 MIN_CONFIDENCE_TO_NOTIFY = 35
 
-# GitHub Actions (ABD/Avrupa) sunucuları için coğrafi engelleri aşan resmi OKX API adresleri
+# OKX'in kısıtlamasız ve engelsiz resmi global API aynaları
 OKX_API_URLS = [
-    "https://us.okx.com",   # ABD IP'leri için resmi uç nokta
-    "https://eea.okx.com",  # Avrupa IP'leri için resmi uç nokta
-    "https://www.okx.com"   # Global uç nokta (Yedek)
+    "https://www.okx.cab",  # Cloudflare engeli olmayan resmi global ayna (Birinci Tercih)
+    "https://www.okx.com"   # Global ana sunucu (Yedek)
 ]
 
 # ============================= HTML Safe Helper =============================
@@ -45,10 +44,7 @@ def html_escape(text):
 # ============================= HTTP Helpers =============================
 
 def http_get_json(path_with_query):
-    """
-    Sırasıyla ABD, Avrupa ve Global OKX API adreslerini dener. 
-    Böylece GitHub hangi ülkede olursa olsun mutlaka birine bağlanır.
-    """
+    """Sırasıyla OKX global aynalarını dener."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json"
@@ -59,11 +55,12 @@ def http_get_json(path_with_query):
         full_url = f"{base_url}{path_with_query}"
         try:
             req = urllib.request.Request(full_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode())
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                res_data = json.loads(resp.read().decode())
+                # Eğer bağlantı kurulduysa ama OKX 'böyle bir enstrüman yok' dediyse diğer adresi denemeye gerek yok, direkt dön.
+                return res_data
         except Exception as e:
             last_error = e
-            # Bir adreste hata alırsak sessizce bir sonrakini dener
             continue
             
     raise ConnectionError(f"Tüm OKX uç noktaları başarısız oldu. Son hata: {last_error}")
@@ -97,19 +94,20 @@ def send_message(text):
 # ============================= OKX API Fetchers =============================
 
 def fetch_klines_okx(symbol):
-    """Farklı bölge uç noktalarını otomatik deneyerek kline verisi çeker."""
+    """Eksiksiz veri için global OKX API'sini sorgular."""
     path = f"/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=150"
     try:
         data = http_get_json(path)
-        if data.get("code") == "0" and data.get("data"):
+        if data.get("code") == "0" and data.get("data") and len(data["data"]) > 0:
             raw_list = data["data"]
         else:
             # Spot yoksa Swap (Vadeli) dene
             swap_symbol = f"{symbol}-SWAP"
             path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=150"
             data = http_get_json(path_swap)
-            if data.get("code") != "0" or not data.get("data"):
-                raise ValueError(f"OKX Hata: {data.get('msg')}")
+            if data.get("code") != "0" or not data.get("data") or len(data["data"]) == 0:
+                err_msg = data.get('msg', 'Bilinmeyen Hata')
+                raise ValueError(f"OKX Hata: {err_msg}")
             raw_list = data["data"]
     except Exception as e:
         raise ValueError(f"Veri çekme hatası ({symbol}): {e}")
@@ -129,7 +127,7 @@ def fetch_klines_okx(symbol):
 
 
 def fetch_prev_daily_okx(symbol):
-    """Günlük mum verilerini çeker (Classic Pivot için)."""
+    """Günlük mum verilerini çeker."""
     path = f"/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
     try:
         data = http_get_json(path)
@@ -271,41 +269,51 @@ def analyze_candle_patterns(candles):
 # ============================= Core Signal Engine =============================
 
 def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
+    if len(candles) < 50:  # En azından EMA 50 için yeterli veri olmalı
+        return None
+
     last = candles[-1]
     price = last["close"]
     closes = [c["close"] for c in candles]
     factors = []
-    
-    if len(closes) < 200:
-        return None
 
     # 1) EMA 50 & 200 Analizi
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     
-    if not ema50 or not ema200:
+    # EMA 50 kesin hesaplanmalı, EMA 200 hesaplanamazsa esnek davranıp çökmeyi önlüyoruz
+    if not ema50:
         return None
         
-    e50_last, e50_prev = ema50[-1], ema50[-2]
-    e200_last, e200_prev = ema200[-1], ema200[-2]
+    e50_last = ema50[-1]
     
-    ema_cross = "none"
-    if e50_prev <= e200_prev and e50_last > e200_last:
-        ema_cross = "golden"
-    elif e50_prev >= e200_prev and e50_last < e200_last:
-        ema_cross = "death"
+    if ema200 and len(ema200) >= 2:
+        e50_prev = ema50[-2]
+        e200_last, e200_prev = ema200[-1], ema200[-2]
+        
+        ema_cross = "none"
+        if e50_prev <= e200_prev and e50_last > e200_last:
+            ema_cross = "golden"
+        elif e50_prev >= e200_prev and e50_last < e200_last:
+            ema_cross = "death"
 
-    if ema_cross == "golden":
-        factors.append(("EMA 50/200", "Golden Cross Kesişimi Gerçekleşti 🚀", 50))
-    elif ema_cross == "death":
-        factors.append(("EMA 50/200", "Death Cross Kesişimi Gerçekleşti 💀", -50))
-    else:
-        if price > e50_last and price > e200_last:
-            factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 üzerinde (Güçlü Alıcı)", 25))
-        elif price < e50_last and price < e200_last:
-            factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 altında (Güçlü Satıcı)", -25))
+        if ema_cross == "golden":
+            factors.append(("EMA 50/200", "Golden Cross Kesişimi Gerçekleşti 🚀", 50))
+        elif ema_cross == "death":
+            factors.append(("EMA 50/200", "Death Cross Kesişimi Gerçekleşti 💀", -50))
         else:
-            factors.append(("EMA Yapısı", "Fiyat EMA kanalı içinde sıkışmış", 0))
+            if price > e50_last and price > e200_last:
+                factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 üzerinde (Güçlü Alıcı)", 25))
+            elif price < e50_last and price < e200_last:
+                factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 altında (Güçlü Satıcı)", -25))
+            else:
+                factors.append(("EMA Yapısı", "Fiyat EMA kanalı içinde sıkışmış", 0))
+    else:
+        # EMA 200 hesaplanamadıysa sadece EMA 50'ye göre basit yön tayini yap
+        if price > e50_last:
+            factors.append(("EMA Yapısı", "Fiyat EMA 50 üzerinde (Kısa Vade Pozitif)", 15))
+        else:
+            factors.append(("EMA Yapısı", "Fiyat EMA 50 altında (Kısa Vade Negatif)", -15))
 
     # 2) Mum Formasyonu Analizi
     pattern_name, pattern_score = analyze_candle_patterns(candles)
@@ -484,8 +492,12 @@ def process_commands(state, watchlist):
 def get_btc_state():
     try:
         candles = fetch_klines_okx("BTC-USDT")
+        if not candles or len(candles) < 200:
+            return None
         closes = [c["close"] for c in candles]
         ema200 = calc_ema(closes, 200)
+        if not ema200:
+            return None
         if closes[-1] > ema200[-1]:
             return {"trend": "bullish", "price": closes[-1]}
         else:
@@ -530,7 +542,7 @@ def main():
     print(f"Piyasa Trend Filtresi (BTC): {btc_state}")
 
     symbols_to_scan = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
-    print(f"OKX (Kararlı Bölge Sunucuları) üzerinde {len(symbols_to_scan)} sembol taranıyor...")
+    print(f"OKX (Kararlı Global Ayna Sunucusu) üzerinde {len(symbols_to_scan)} sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
