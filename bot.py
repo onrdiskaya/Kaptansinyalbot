@@ -1,7 +1,7 @@
 """
 Kesişim Radar - Telegram Sinyal Botu (CoinGecko Entegrasyonlu - Hata Korumalı)
 GitHub Actions IP engellerini tamamen aşmak için verileri CoinGecko üzerinden çeker.
-Herhangi bir API hatasında botun durmasını engellemek için try-except blokları güçlendirilmiştir.
+Herhangi bir API veya Telegram hatasında botun durmasını engellemek için tüm bloklar zırhlandırılmıştır.
 """
 
 import json
@@ -11,8 +11,8 @@ import time
 import urllib.request
 import urllib.parse
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
@@ -77,12 +77,19 @@ def http_get_json(url):
 
 
 def telegram_api(method, params=None):
-    base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    if params:
-        url = base + "?" + urllib.parse.urlencode(params)
-    else:
-        url = base
-    return http_get_json(url)
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram token veya Chat ID eksik!")
+        return {}
+    try:
+        base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+        if params:
+            url = base + "?" + urllib.parse.urlencode(params)
+        else:
+            url = base
+        return http_get_json(url)
+    except Exception as e:
+        print(f"⚠️ Telegram API Hatası ({method}): {e}")
+        return {}
 
 
 def send_message(text):
@@ -100,8 +107,8 @@ def fetch_klines_coingecko(symbol):
     if not cg_id:
         raise ValueError(f"CoinGecko ID bulunamadı: {symbol}")
         
-    # Bad Request hatasını çözmek için sadeleştirilmiş parametreler kullanıyoruz
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2"
+    # days=5 saatlik veri çekmek için en kararlı parametredir (API 400 hatasını önler)
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=5"
     data = http_get_json(url)
     
     prices = data.get("prices", [])
@@ -131,8 +138,7 @@ def fetch_klines_coingecko(symbol):
 
 def fetch_prev_daily_coingecko(symbol):
     cg_id = COINGECKO_MAP.get(symbol)
-    # Günlük mum için parametre düzeltildi
-    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=2"
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days=5"
     data = http_get_json(url)
     prices = data.get("prices", [])
     if len(prices) < 2:
@@ -432,7 +438,7 @@ def process_commands(state, watchlist):
     try:
         updates = telegram_api("getUpdates", {"offset": offset, "timeout": 0})
     except Exception as e:
-        print("getUpdates hata:", e)
+        print("⚠️ getUpdates çağrısı başarısız oldu:", e)
         return watchlist, state
 
     results = updates.get("result", [])
@@ -519,28 +525,32 @@ def process_commands(state, watchlist):
 
 def load_json(path, default):
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
-
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
     return default
 
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Dosya kaydedilirken hata oluştu ({path}): {e}")
 
 
 def main():
     watchlist = ["ALL"]
     state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
 
-    watchlist, state = process_commands(state, watchlist)
+    # Telegram komutlarını güvenli bir şekilde işle
+    try:
+        watchlist, state = process_commands(state, watchlist)
+    except Exception as e:
+        print("⚠️ Komutlar işlenirken hata oluştu:", e)
+
     state.setdefault("last_signals", {})
 
     if watchlist == ["ALL"]:
@@ -552,25 +562,26 @@ def main():
 
     for symbol in symbols_to_scan:
         try:
-            # CoinGecko ücretsiz API rate-limit sınırı için bekleme süresi
-            time.sleep(1.5)
+            # Sıkışıklığı ve API banını önlemek için bekleme süresi
+            time.sleep(2.0)
             candles = fetch_klines_coingecko(symbol)
             prev_daily = fetch_prev_daily_coingecko(symbol)
             sig = generate_signal(symbol, candles, prev_daily)
+            
+            if not sig:
+                continue
+
+            prev_direction = state["last_signals"].get(symbol)
+            if sig["direction"] in ("AL", "SAT") and sig["direction"] != prev_direction:
+                send_message(format_signal_message(sig))
+                time.sleep(0.5)
+
+            state["last_signals"][symbol] = sig["direction"]
+            
         except Exception as e:
-            # HATA KORUMASI: Bir coin hata verirse botu durdurma, log yaz ve sıradakine geç.
+            # HATA KORUMASI: Bir coin'de istek patlarsa asla botu çökertme, logla ve sıradakine geç!
             print(f"⚠️ {symbol} işlenirken hata oluştu (atlandı): {e}")
             continue
-
-        if not sig:
-            continue
-
-        prev_direction = state["last_signals"].get(symbol)
-        if sig["direction"] in ("AL", "SAT") and sig["direction"] != prev_direction:
-            send_message(format_signal_message(sig))
-            time.sleep(0.5)
-
-        state["last_signals"][symbol] = sig["direction"]
 
     save_json(WATCHLIST_FILE, watchlist)
     save_json(STATE_FILE, state)
