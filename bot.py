@@ -1,5 +1,5 @@
 """
-Kesişim Radar - "Capitano Pro" (Bybit Sürümü)
+Kesişim Radar - "Capitano Pro" (Bybit Sürümü - 403 Bypasslı)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, Bybit Funding Rate,
 ve Kritik Mum Formasyonları (Çekiç, Yutan Boğa, Asılı Adam vb.) içeren gelişmiş tarayıcı.
 """
@@ -35,12 +35,17 @@ MIN_CONFIDENCE_TO_NOTIFY = 35
 def html_escape(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# ============================= HTTP Helpers =============================
+# ============================= HTTP Helpers (403 BYPASS) =============================
 
 def http_get_json(url):
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    })
+    # 403 engeline takılmamak için tarayıcı taklidi yapan başlıklar (Headers)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.bybit.com/"
+    }
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
 
@@ -55,6 +60,8 @@ def telegram_api(method, params=None):
             url = base + "?" + urllib.parse.urlencode(params)
         else:
             url = base
+        # Telegram isteklerinde standart http_get_json yerine daha basit istek atılabilir 
+        # ancak senkronizasyon için aynı tarayıcı taklidini kullanmakta zarar yok
         return http_get_json(url)
     except Exception as e:
         print(f"⚠️ Telegram API Hatası: {e}")
@@ -449,7 +456,8 @@ def get_btc_state():
             return {"trend": "bullish", "price": closes[-1]}
         else:
             return {"trend": "bearish", "price": closes[-1]}
-    except Exception:
+    except Exception as e:
+        print(f"BTC State Error: {e}")
         return None
 
 
