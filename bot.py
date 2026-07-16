@@ -2,7 +2,7 @@
 Kesişim Radar - Telegram Sinyal Botu
 Her çalıştırıldığında:
   1) Telegram'dan gelen yeni komutları okur (/add, /remove, /list, /all, /manual)
-  2) İzleme listesindeki (ya da TÜM piyasadaki) her sembol için EMA50/200 + Pivot + Fibonacci + Hacim sinyali üretir
+  2) İzleme listesindeki (ya da TÜM piyasadaki) her sembol için EMA50/200 + Pivot + Fibonacci + Hacim + RSI + MACD + Bollinger sinyali üretir
   3) Yön değişen (yeni AL/SAT oluşan) semboller için Telegram mesajı gönderir
   4) watchlist.json ve state.json dosyalarını günceller (workflow bunları commit'ler)
 
@@ -24,9 +24,9 @@ WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
 TIMEFRAME = "15m"
-PROXIMITY_PIVOT = 0.85      # %0.35'ten %0.85'e esnetildi (Pivot yakalama kolaylaştırıldı)
-PROXIMITY_FIB = 1.0         # %0.5'ten %1.0'e esnetildi (Fibonacci seviye toleransı artırıldı)
-MIN_CONFIDENCE_TO_NOTIFY = 20 # Güven sınırı 30'dan 20'ye düşürüldü (Sinyal üretimi kolaylaştırıldı)
+PROXIMITY_PIVOT = 0.85      # %
+PROXIMITY_FIB = 1.0         # %
+MIN_CONFIDENCE_TO_NOTIFY = 20
 
 
 # ============================= HTTP helpers =============================
@@ -188,13 +188,81 @@ def analyze_volume(candles, period=20, spike_threshold=1.5):
     return {"ratio": ratio, "is_spike": ratio >= spike_threshold}
 
 
+def calc_rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return []
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    rsi_vals = []
+    if avg_loss == 0:
+        rsi_vals.append(100.0)
+    else:
+        rs = avg_gain / avg_loss
+        rsi_vals.append(100.0 - (100.0 / (1.0 + rs)))
+        
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            rsi_vals.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            rsi_vals.append(100.0 - (100.0 / (1.0 + rs)))
+    return rsi_vals
+
+
+def calc_macd(closes):
+    if len(closes) < 35:
+        return [], []
+    ema12 = calc_ema(closes, 12)
+    ema26 = calc_ema(closes, 26)
+    n = min(len(ema12), len(ema26))
+    macd_line = [e12 - e26 for e12, e26 in zip(ema12[-n:], ema26[-n:])]
+    signal_line = calc_ema(macd_line, 9)
+    return macd_line, signal_line
+
+
+def analyze_bollinger_squeeze(closes, period=20, lookback_squeeze=100):
+    if len(closes) < period:
+        return False, 0.0
+    
+    bandwidths = []
+    for i in range(len(closes) - lookback_squeeze, len(closes)):
+        if i < period:
+            continue
+        window = closes[i-period:i]
+        sma = sum(window) / period
+        variance = sum((x - sma) ** 2 for x in window) / period
+        std_dev = variance ** 0.5
+        upper = sma + (2 * std_dev)
+        lower = sma - (2 * std_dev)
+        bandwidth = (upper - lower) / sma if sma != 0 else 0
+        bandwidths.append(bandwidth)
+        
+    if not bandwidths:
+        return False, 0.0
+        
+    current_bw = bandwidths[-1]
+    sorted_bws = sorted(bandwidths)
+    threshold = sorted_bws[int(len(sorted_bws) * 0.15)] # En dar %15'lik dilim sıkışma kabul edilir
+    
+    return current_bw <= threshold, current_bw
+
+
 # ============================= Signal Engine =============================
 
 def generate_signal(symbol, candles, prev_daily):
     last = candles[-1]
     price = last["close"]
+    closes = [c["close"] for c in candles]
     factors = []
 
+    # 1) EMA Sinyalleri
     ema = analyze_ema(candles)
     if not ema:
         return None
@@ -204,11 +272,11 @@ def generate_signal(symbol, candles, prev_daily):
     elif ema["last_cross"] == "death":
         factors.append(("EMA 50/200", "Death Cross oluştu (düşüş dönüşü)", -40))
     else:
-        # Trend devam ederken verilen puan 15'ten 25'e yükseltildi.
         score = 25 if ema["trend_is_bullish"] else -25
         text = "EMA50 > EMA200, trend yukarı" if ema["trend_is_bullish"] else "EMA50 < EMA200, trend aşağı"
         factors.append(("EMA 50/200", text, score))
 
+    # 2) Pivot Sinyalleri
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = None, float("inf")
@@ -224,6 +292,7 @@ def generate_signal(symbol, candles, prev_daily):
                 25 if is_support else -25,
             ))
 
+    # 3) Fibonacci Sinyalleri
     fib = fib_retracement(candles, 50)
     if fib:
         nf = nearest_fib(price, fib)
@@ -235,12 +304,46 @@ def generate_signal(symbol, candles, prev_daily):
                 20 if fib["is_uptrend"] else -20,
             ))
 
+    # 4) RSI Sinyalleri (20 altı AL / 90 üstü SAT)
+    rsi_vals = calc_rsi(closes)
+    current_rsi = rsi_vals[-1] if rsi_vals else 50
+    if current_rsi <= 20:
+        factors.append(("RSI", f"Aşırı Satım Bölgesi (%{current_rsi:.1f}) - Alım Fırsatı", 35))
+    elif current_rsi >= 90:
+        factors.append(("RSI", f"Aşırı Alım Bölgesi (%{current_rsi:.1f}) - Satım Zamanı", -35))
+    else:
+        factors.append(("RSI", f"Nötr bölgede (%{current_rsi:.1f})", 0))
+
+    # 5) MACD & RSI Entegrasyon Sinyalleri
+    macd_line, signal_line = calc_macd(closes)
+    if len(macd_line) >= 2 and len(signal_line) >= 2:
+        prev_macd, last_macd = macd_line[-2], macd_line[-1]
+        prev_sig, last_sig = signal_line[-2], signal_line[-1]
+        
+        macd_cross_up = prev_macd <= prev_sig and last_macd > last_sig
+        macd_cross_down = prev_macd >= prev_sig and last_macd < last_sig
+        
+        if macd_cross_up:
+            # RSI Dipteyken gelen MACD Al sinyali katmerli güçlüdür
+            bonus = 15 if current_rsi < 35 else 0
+            factors.append(("MACD", f"Yukarı yönlü kesişim (RSI entegre teyitli)", 20 + bonus))
+        elif macd_cross_down:
+            # RSI Tepedeyken gelen MACD Sat sinyali katmerli güçlüdür
+            bonus = 15 if current_rsi > 65 else 0
+            factors.append(("MACD", f"Aşağı yönlü kesişim (RSI entegre teyitli)", -20 - bonus))
+
+    # 6) Bollinger Sıkışması (Ayrı Sinyal/Bilgi Olarak)
+    is_squeezed, bw_val = analyze_bollinger_squeeze(closes)
+    if is_squeezed:
+        factors.append(("Bollinger Sıkışması", f"Bantlar aşırı daraldı ({bw_val:.4f})! Sert patlama yaklaşıyor.", 0))
+
+    # 7) Hacim Patlamaları Sinyali
     volume_multiplier = 1.0
     vol = analyze_volume(candles)
     if vol:
         if vol["is_spike"]:
-            volume_multiplier = 1.25
-            factors.append(("Hacim", f"Hacim ortalamanın {vol['ratio']:.1f}x üzerinde (teyit güçlü)", 0))
+            volume_multiplier = 1.35  # Güçlü hacimde skoru çarparak sinyali güçlendiririz
+            factors.append(("Hacim", f"Hacim ortalamanın {vol['ratio']:.1f}x üzerinde (GÜÇLÜ GİRİŞ)", 15))
         else:
             factors.append(("Hacim", f"Hacim normal seviyede (%{int(vol['ratio']*100)} ortalama)", 0))
 
@@ -298,7 +401,7 @@ def process_commands(state, watchlist):
         text = (msg.get("text") or "").strip()
         chat_id = str(msg.get("chat", {}).get("id", ""))
         if chat_id != str(TELEGRAM_CHAT_ID):
-            continue  # sadece kendi chat_id'nden gelen komutları işle
+            continue
 
         if text.startswith("/add"):
             if watchlist == ["ALL"]:
@@ -413,13 +516,12 @@ def main():
             continue
 
         prev_direction = state["last_signals"].get(symbol)
-        # Sadece yön DEĞİŞTİĞİNDE (yeni AL/SAT oluştuğunda) bildirim gönder — spam önlenir.
         if sig["direction"] in ("AL", "SAT") and sig["direction"] != prev_direction:
             send_message(format_signal_message(sig))
-            time.sleep(0.5)  # Telegram flood limitine takılmamak için
+            time.sleep(0.5)
 
         state["last_signals"][symbol] = sig["direction"]
-        time.sleep(0.3)  # Binance rate-limit'e takılmamak için ufak bekleme
+        time.sleep(0.3)
 
     save_json(WATCHLIST_FILE, watchlist)
     save_json(STATE_FILE, state)
