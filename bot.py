@@ -1,7 +1,7 @@
 """
-Kesişim Radar - "Capitano Pro v2" (Kusursuzlaştırılmış & Tam Sürüm)
+Kesişim Radar - "Capitano Pro v2" (Zaman Sapması Engellenmiş - Sonsuz Döngü Sürümü)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
-ve Mum Formasyonları içeren, GitHub Actions dostu kararlı tarayıcı.
+ve Mum Formasyonları içeren, GitHub Actions dostu kararlı ve tam tarayıcı.
 """
 
 import json
@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# OKX formatında popüler pariteler (Sorun çıkaran FTM, MKR ve RUNE listeden tamamen kaldırıldı)
+# OKX formatında popüler pariteler (Hatalı coinler listeden kalıcı olarak çıkarıldı)
 POPULAR_USDT_SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
     "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
@@ -32,8 +32,8 @@ MIN_CONFIDENCE_TO_NOTIFY = 35
 
 # OKX'in engelsiz resmi global API aynaları
 OKX_API_URLS = [
-    "https://www.okx.cab",  # Cloudflare engeli olmayan resmi global ayna
-    "https://www.okx.com"   # Global ana sunucu
+    "https://www.okx.cab",
+    "https://www.okx.com"
 ]
 
 # ============================= HTML Safe Helper =============================
@@ -88,22 +88,19 @@ def send_message(text):
         "parse_mode": "HTML",
     })
 
-# ============================= OKX API Fetchers (Geliştirilmiş & Hata Geçirmez) =============================
+# ============================= OKX API Fetchers =============================
 
 def fetch_klines_okx(symbol):
-    """Eksiksiz veri için global OKX API'sini sorgular. limit=250 ile EMA 200 korunur. Spotta hata alırsa Swap dener."""
     path = f"/api/v5/market/candles?instId={symbol}&bar={TIMEFRAME}&limit=250"
     raw_list = None
     
-    # Önce Spot Dene
     try:
         data = http_get_json(path)
         if data.get("code") == "0" and data.get("data") and len(data["data"]) > 0:
             raw_list = data["data"]
     except Exception:
-        pass  # Hata durumunda sessizce devam et, swap tahtasını deneyeceğiz
+        pass
         
-    # Spot başarısız olduysa ya da boşsa Swap (Vadeli) Dene
     if not raw_list:
         swap_symbol = f"{symbol}-SWAP"
         path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar={TIMEFRAME}&limit=250"
@@ -132,11 +129,9 @@ def fetch_klines_okx(symbol):
 
 
 def fetch_prev_daily_okx(symbol):
-    """Günlük mum verilerini çeker."""
     path = f"/api/v5/market/candles?instId={symbol}&bar=1Dutc&limit=2"
     raw_list = None
     
-    # Önce Spot Dene
     try:
         data = http_get_json(path)
         if data.get("code") == "0" and len(data.get("data", [])) >= 2:
@@ -144,7 +139,6 @@ def fetch_prev_daily_okx(symbol):
     except Exception:
         pass
         
-    # Spot başarısız olduysa Swap Dene
     if not raw_list:
         swap_symbol = f"{symbol}-SWAP"
         path_swap = f"/api/v5/market/candles?instId={swap_symbol}&bar=1Dutc&limit=2"
@@ -167,7 +161,6 @@ def fetch_prev_daily_okx(symbol):
 
 
 def fetch_funding_rate_okx(symbol):
-    """Canlı fonlama oranını çeker (Yalnızca Swap tahtalarında bulunur)."""
     swap_symbol = f"{symbol}-SWAP"
     path = f"/api/v5/public/funding-rate?instId={swap_symbol}"
     try:
@@ -257,22 +250,18 @@ def analyze_candle_patterns(candles):
     b2, hs2, ls2, t2, bull2 = get_parts(c2)
     b1, hs1, ls1, t1, bull1 = get_parts(c1)
 
-    # 1) Yutan Boğa (Bullish Engulfing)
     if not bull1 and bull2 and c2["close"] > c1["open"] and c2["open"] < c1["close"]:
         return "Yutan Boğa (Bullish Engulfing) 🟢", 30
 
-    # 2) Yutan Ayı (Bearish Engulfing)
     if bull1 and not bull2 and c2["close"] < c1["open"] and c2["open"] > c1["close"]:
         return "Yutan Ayı (Bearish Engulfing) 🔴", -30
 
-    # 3) Çekiç (Hammer)
     if t2 > 0 and (ls2 >= 2 * b2) and (hs2 <= 0.1 * t2):
         if bull2:
             return "Çekiç (Hammer) 🟢", 25
         else:
             return "Ters Çekiç (Inverted Hammer) 🟡", 15
 
-    # 4) Kayan Yıldız / Asılı Adam
     if t2 > 0 and (hs2 >= 2 * b2) and (ls2 <= 0.1 * t2):
         if not bull2:
             return "Kayan Yıldız (Shooting Star) 🔴", -25
@@ -292,7 +281,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
     closes = [c["close"] for c in candles]
     factors = []
 
-    # 1) EMA 50 & 200 Analizi
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     
@@ -328,12 +316,10 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
         else:
             factors.append(("EMA Yapısı", "Fiyat EMA 50 altında (Kısa Vade Negatif)", -15))
 
-    # 2) Mum Formasyonu Analizi
     pattern_name, pattern_score = analyze_candle_patterns(candles)
     if pattern_name:
         factors.append(("Mum Formasyonu", f"{pattern_name} tespit edildi", pattern_score))
 
-    # 3) Pivot Analizi
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = None, float("inf")
@@ -358,7 +344,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
             
         factors.append(("Pivot Analizi", pivot_detail, int(pivot_score)))
 
-    # 4) RSI Analizi
     rsi_vals = calc_rsi(closes)
     if rsi_vals:
         curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
@@ -373,7 +358,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
         else:
             factors.append(("RSI", f"Nötr bölgede (%{curr_rsi:.1f})", 0))
 
-    # 5) MACD Analizi
     macd_line, signal_line = calc_macd(closes)
     if len(macd_line) >= 2 and len(signal_line) >= 2:
         prev_macd, last_macd = macd_line[-2], macd_line[-1]
@@ -383,7 +367,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
         elif prev_macd >= prev_sig and last_macd < last_sig:
             factors.append(("MACD", "Yukarıdan Aşağı Kesti (SAT) 🔴", -20))
 
-    # 6) Fonlama Oranı Analizi
     if funding_rate != 0.0:
         if funding_rate >= 0.0005:
             factors.append(("Funding Rate", f"Yüksek Fonlama (%{funding_rate*100:.3f}) - Long Squeeze Riski! ⚠️", -15))
@@ -394,7 +377,6 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
 
     raw_score = sum(f[2] for f in factors)
     
-    # 7) BTC Filtresi (Düşüş piyasasında Long sinyal gücünü kırar)
     if btc_state:
         if btc_state["trend"] == "bearish" and raw_score > 0:
             raw_score *= 0.5
@@ -431,12 +413,12 @@ def format_signal_message(sig):
     ]
     
     for name, detail, score in sig["factors"]:
-        arrow = "✅" if score > 0 else ("❌" if score < 0 else "•")
-        lines.append(f"{arrow} <b>{html_escape(name)}:</b> {html_escape(detail)}")
+        if score != 0:
+            arrow = "✅" if score > 0 else "❌"
+            lines.append(f"{arrow} <b>{html_escape(name)}:</b> {html_escape(detail)}")
         
     lines.append("\n⚠️ <i>Grafiğini açıp mutlaka Price Action teyidi al Onur!</i>")
     return "\n".join(lines)
-
 
 # ============================= Command & Flow Management =============================
 
@@ -493,10 +475,12 @@ def process_commands(state, watchlist):
 
         elif text.startswith("/all"):
             watchlist = ["ALL"]
+            save_json(WATCHLIST_FILE, watchlist)
             send_message("🌐 Tüm popüler OKX coinleri tarama moduna geçildi.")
 
         elif text.startswith("/manual"):
             watchlist = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+            save_json(WATCHLIST_FILE, watchlist)
             send_message("📋 Elle liste moduna geçildi. Varsayılan: BTC, ETH, SOL.")
 
     return watchlist, state
@@ -520,8 +504,6 @@ def get_btc_state():
         return None
 
 
-# ============================= Main Pipeline =============================
-
 def load_json(path, default):
     if os.path.exists(path):
         try:
@@ -539,27 +521,18 @@ def save_json(path, data):
     except Exception:
         pass
 
+# ============================= Core Pipeline Iteration =============================
 
-def main():
-    watchlist = ["ALL"]
-    state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
-
-    try:
-        watchlist, state = process_commands(state, watchlist)
-    except Exception:
-        pass
-
-    state.setdefault("last_signals", {})
-
+def single_scan(state, watchlist):
     btc_state = get_btc_state()
     print(f"Piyasa Trend Filtresi (BTC): {btc_state}")
 
     symbols_to_scan = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
-    print(f"OKX (Kararlı Global Ayna Sunucusu) üzerinde {len(symbols_to_scan)} sembol taranıyor...")
+    print(f"🔄 Tarama başlatıldı... [Mevcut Saat: {time.strftime('%H:%M:%S')}] - {len(symbols_to_scan)} sembol taranıyor...")
 
     for symbol in symbols_to_scan:
         try:
-            time.sleep(0.3)
+            time.sleep(0.25)
             
             candles = fetch_klines_okx(symbol)
             prev_daily = fetch_prev_daily_okx(symbol)
@@ -581,8 +554,46 @@ def main():
             print(f"⚠️ {symbol} taranırken hata: {e}")
             continue
 
-    save_json(WATCHLIST_FILE, watchlist)
     save_json(STATE_FILE, state)
+
+# ============================= Main Pipeline Loop =============================
+
+def main():
+    start_time = time.time()
+    # GitHub Actions maksimum 6 saat çalışabilir. 5.5 saatte (19800 saniye) döngüyü sonlandırıp nöbeti devredelim.
+    MAX_RUN_TIME = 5.5 * 60 * 60 
+    INTERVAL = 15 * 60  # Tam 15 dakika (900 saniye)
+    
+    print("🚀 Capitano Zaman Koruyucu Döngüsü Aktif Edildi.")
+    
+    while True:
+        loop_start = time.time()
+        
+        # 5.5 saat doldu mu?
+        if loop_start - start_time > MAX_RUN_TIME:
+            print("⏳ 5.5 saatlik maksimum oturum süresi doldu. Sistem sonraki otomatik tetikleme için kapanıyor.")
+            break
+            
+        watchlist = load_json(WATCHLIST_FILE, ["ALL"])
+        state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
+        state.setdefault("last_signals", {})
+        
+        # Döngü başında Telegram komutlarını oku ve listeyi güncelle
+        try:
+            watchlist, state = process_commands(state, watchlist)
+            save_json(WATCHLIST_FILE, watchlist)
+        except Exception as e:
+            print(f"⚠️ Komut işleme hatası: {e}")
+            
+        # Taramayı yap
+        single_scan(state, watchlist)
+        
+        # Kodun harcadığı süreyi hesapla, tam 15 dakikaya tamamlayacak kadar uyu
+        elapsed = time.time() - loop_start
+        sleep_time = max(10, INTERVAL - elapsed)
+        
+        print(f"💤 Tarama tamamlandı. Bir sonraki periyot için {int(sleep_time)} saniye geri sayım başladı...\n")
+        time.sleep(sleep_time)
 
 
 if __name__ == "__main__":
