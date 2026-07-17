@@ -1,5 +1,10 @@
 name: Sinyal Taraması
 
+# Üst üste binen taramaları otomatik temizleyen sihirli kısım
+concurrency:
+  group: signal-scanner
+  cancel-in-progress: true
+
 on:
   schedule:
     - cron: "*/15 * * * *"   # her 15 dakikada bir otomatik çalışır
