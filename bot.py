@@ -1,7 +1,7 @@
 """
-Kesişim Radar - "Capitano Pro v2" (Zaman Sapması Engellenmiş - Sonsuz Döngü Sürümü)
+Kesişim Radar - "Capitano Pro v2.1" (Gelişmiş Fiyat ve Sabit Gösterge Sürümü)
 EMA 50/200 Trendi, Günlük Pivotlar, RSI/MACD Dönüşleri, OKX Funding Rate,
-ve Mum Formasyonları içeren, GitHub Actions dostu kararlı ve tam tarayıcı.
+ve Mum Formasyonları içeren, Sabit İndikatör Raporlamalı Tam Sürüm.
 """
 
 import json
@@ -17,7 +17,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
 
-# OKX formatında popüler pariteler (Hatalı coinler listeden kalıcı olarak çıkarıldı)
 POPULAR_USDT_SYMBOLS = [
     "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT", "AVAX-USDT", 
     "DOT-USDT", "DOGE-USDT", "SHIB-USDT", "LINK-USDT", "NEAR-USDT", "LTC-USDT", "UNI-USDT", 
@@ -30,7 +29,6 @@ POPULAR_USDT_SYMBOLS = [
 TIMEFRAME = "15m"
 MIN_CONFIDENCE_TO_NOTIFY = 35
 
-# OKX'in engelsiz resmi global API aynaları
 OKX_API_URLS = [
     "https://www.okx.cab",
     "https://www.okx.com"
@@ -279,46 +277,47 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
     last = candles[-1]
     price = last["close"]
     closes = [c["close"] for c in candles]
-    factors = []
+    
+    # Rapor satırlarını zorunlu basmak için dictionary yapısına geçtik
+    report_data = {
+        "EMA Yapısı": {"detail": "Hesaplanamadı", "score": 0, "status": "neutral"},
+        "Mum Formasyonu": {"detail": "Belirgin bir formasyon yok", "score": 0, "status": "neutral"},
+        "Pivot Analizi": {"detail": "Pivot verisi eksik", "score": 0, "status": "neutral"},
+        "RSI": {"detail": "Hesaplanamadı", "score": 0, "status": "neutral"},
+        "MACD": {"detail": "Kesişim yok (Nötr) ⚪", "score": 0, "status": "neutral"},
+        "Funding Rate": {"detail": "Dengeli", "score": 0, "status": "neutral"}
+    }
 
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     
-    if not ema50:
-        return None
-        
-    e50_last = ema50[-1]
-    
-    if ema200 and len(ema200) >= 2:
-        e50_prev = ema50[-2]
-        e200_last, e200_prev = ema200[-1], ema200[-2]
-        
-        ema_cross = "none"
-        if e50_prev <= e200_prev and e50_last > e200_last:
-            ema_cross = "golden"
-        elif e50_prev >= e200_prev and e50_last < e200_last:
-            ema_cross = "death"
-
-        if ema_cross == "golden":
-            factors.append(("EMA 50/200", "Golden Cross Kesişimi Gerçekleşti 🚀", 50))
-        elif ema_cross == "death":
-            factors.append(("EMA 50/200", "Death Cross Kesişimi Gerçekleşti 💀", -50))
-        else:
-            if price > e50_last and price > e200_last:
-                factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 üzerinde (Güçlü Alıcı)", 25))
-            elif price < e50_last and price < e200_last:
-                factors.append(("EMA Yapısı", "Fiyat EMA 50 & 200 altında (Güçlü Satıcı)", -25))
+    if ema50:
+        e50_last = ema50[-1]
+        if ema200 and len(ema200) >= 2:
+            e50_prev = ema50[-2]
+            e200_last, e200_prev = ema200[-1], ema200[-2]
+            
+            if e50_prev <= e200_prev and e50_last > e200_last:
+                report_data["EMA Yapısı"] = {"detail": "Golden Cross Kesişimi Gerçekleşti 🚀", "score": 50, "status": "bullish"}
+            elif e50_prev >= e200_prev and e50_last < e200_last:
+                report_data["EMA Yapısı"] = {"detail": "Death Cross Kesişimi Gerçekleşti 💀", "score": -50, "status": "bearish"}
             else:
-                factors.append(("EMA Yapısı", "Fiyat EMA kanalı içinde sıkışmış", 0))
-    else:
-        if price > e50_last:
-            factors.append(("EMA Yapısı", "Fiyat EMA 50 üzerinde (Kısa Vade Pozitif)", 15))
+                if price > e50_last and price > e200_last:
+                    report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 üzerinde (Güçlü Alıcı)", "score": 25, "status": "bullish"}
+                elif price < e50_last and price < e200_last:
+                    report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 altında (Güçlü Satıcı)", "score": -25, "status": "bearish"}
+                else:
+                    report_data["EMA Yapısı"] = {"detail": "Fiyat EMA kanalı içinde sıkışmış", "score": 0, "status": "neutral"}
         else:
-            factors.append(("EMA Yapısı", "Fiyat EMA 50 altında (Kısa Vade Negatif)", -15))
+            if price > e50_last:
+                report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 üzerinde (Kısa Vade Pozitif)", "score": 15, "status": "bullish"}
+            else:
+                report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 altında (Kısa Vade Negatif)", "score": -15, "status": "bearish"}
 
     pattern_name, pattern_score = analyze_candle_patterns(candles)
     if pattern_name:
-        factors.append(("Mum Formasyonu", f"{pattern_name} tespit edildi", pattern_score))
+        status = "bullish" if pattern_score > 0 else "bearish"
+        report_data["Mum Formasyonu"] = {"detail": f"{pattern_name} tespit edildi", "score": pattern_score, "status": status}
 
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
@@ -337,62 +336,63 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
         
         pivot_detail = f"Fiyat PP üzerinde. {nearest_name} yakınlarında (%{nearest_dist:.2f})" if is_above_pp else f"Fiyat PP altında. {nearest_name} yakınlarında (%{nearest_dist:.2f})"
         pivot_score = 15 if is_above_pp else -15
+        status = "bullish" if is_above_pp else "bearish"
         
         if pivot_range_pct < 2.5:
             pivot_detail += " | Pivot Aralığı Aşırı Daraldı (PATLAMA YAKIN) 💥"
             pivot_score *= 1.3
             
-        factors.append(("Pivot Analizi", pivot_detail, int(pivot_score)))
+        report_data["Pivot Analizi"] = {"detail": pivot_detail, "score": int(pivot_score), "status": status}
 
     rsi_vals = calc_rsi(closes)
     if rsi_vals:
         curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
         if curr_rsi <= 25:
-            factors.append(("RSI", f"Aşırı Satım Bölgesi (%{curr_rsi:.1f})", 20))
+            report_data["RSI"] = {"detail": f"Aşırı Satım Bölgesi (%{curr_rsi:.1f})", "score": 20, "status": "bullish"}
         elif prev_rsi < 30 and curr_rsi > prev_rsi:
-            factors.append(("RSI", f"Dipten Kafayı Yukarı Kaldırdı (%{curr_rsi:.1f}) 📈", 30))
+            report_data["RSI"] = {"detail": f"Dipten Kafayı Yukarı Kaldırdı (%{curr_rsi:.1f}) 📈", "score": 30, "status": "bullish"}
         elif curr_rsi >= 75:
-            factors.append(("RSI", f"Aşırı Alım Bölgesi (%{curr_rsi:.1f})", -20))
+            report_data["RSI"] = {"detail": f"Aşırı Alım Bölgesi (%{curr_rsi:.1f})", "score": -20, "status": "bearish"}
         elif prev_rsi > 70 and curr_rsi < prev_rsi:
-            factors.append(("RSI", f"Tepeden Aşağı Dönüyor (%{curr_rsi:.1f}) 📉", -30))
+            report_data["RSI"] = {"detail": f"Tepeden Aşağı Dönüyor (%{curr_rsi:.1f}) 📉", "score": -30, "status": "bearish"}
         else:
-            factors.append(("RSI", f"Nötr bölgede (%{curr_rsi:.1f})", 0))
+            report_data["RSI"] = {"detail": f"Nötr bölgede (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
 
     macd_line, signal_line = calc_macd(closes)
     if len(macd_line) >= 2 and len(signal_line) >= 2:
         prev_macd, last_macd = macd_line[-2], macd_line[-1]
         prev_sig, last_sig = signal_line[-2], signal_line[-1]
         if prev_macd <= prev_sig and last_macd > last_sig:
-            factors.append(("MACD", "Aşağıdan Yukarı Kesti (AL) 🟢", 20))
+            report_data["MACD"] = {"detail": "Aşağıdan Yukarı Kesti (AL) 🟢", "score": 20, "status": "bullish"}
         elif prev_macd >= prev_sig and last_macd < last_sig:
-            factors.append(("MACD", "Yukarıdan Aşağı Kesti (SAT) 🔴", -20))
+            report_data["MACD"] = {"detail": "Yukarıdan Aşağı Kesti (SAT) 🔴", "score": -20, "status": "bearish"}
+        else:
+            report_data["MACD"] = {"detail": "Kesişim Yok (Yatay) ⚪", "score": 0, "status": "neutral"}
 
     if funding_rate != 0.0:
         if funding_rate >= 0.0005:
-            factors.append(("Funding Rate", f"Yüksek Fonlama (%{funding_rate*100:.3f}) - Long Squeeze Riski! ⚠️", -15))
+            report_data["Funding Rate"] = {"detail": f"Yüksek Fonlama (%{funding_rate*100:.3f}) - Long Squeeze Riski! ⚠️", "score": -15, "status": "bearish"}
         elif funding_rate <= -0.0005:
-            factors.append(("Funding Rate", f"Yüksek Negatif (%{funding_rate*100:.3f}) - Short Squeeze Riski! 🚀", 15))
+            report_data["Funding Rate"] = {"detail": f"Yüksek Negatif (%{funding_rate*100:.3f}) - Short Squeeze Riski! 🚀", "score": 15, "status": "bullish"}
         else:
-            factors.append(("Funding Rate", f"Dengeli (%{funding_rate*100:.4f})", 0))
+            report_data["Funding Rate"] = {"detail": f"Dengeli (%{funding_rate*100:.4f})", "score": 0, "status": "neutral"}
 
-    raw_score = sum(f[2] for f in factors)
+    raw_score = sum(v["score"] for v in report_data.values())
     
     if btc_state:
         if btc_state["trend"] == "bearish" and raw_score > 0:
             raw_score *= 0.5
-            factors.append(("Piyasa Etkisi (BTC)", "BTC düşüş trendinde olduğu için sinyal gücü kırıldı.", 0))
         elif btc_state["trend"] == "bullish" and raw_score < 0:
             raw_score *= 0.5
 
     confidence = min(100, abs(raw_score))
-    
     direction = "IZLE"
     if confidence >= MIN_CONFIDENCE_TO_NOTIFY:
         direction = "AL" if raw_score > 0 else "SAT"
 
     return {
         "symbol": symbol, "direction": direction, "confidence": confidence,
-        "price": price, "factors": factors, "funding": funding_rate
+        "price": price, "report_data": report_data, "funding": funding_rate
     }
 
 
@@ -403,19 +403,27 @@ def format_signal_message(sig):
     price_val = sig['price']
     conf = int(sig['confidence'])
     
+    # Dinamik Fiyat Gösterimi: 1 dolar altı coinlere otomatik 8 basamak basıyoruz.
+    price_str = f"${price_val:.8f}" if price_val < 1.0 else f"${price_val:.2f}"
+    
     lines = [
         f"{emoji} <b>#{sym}</b>",
-        f"<b>Anlık Fiyat:</b> ${price_val:.4f}" if price_val < 1 else f"<b>Anlık Fiyat:</b> ${price_val:.2f}",
+        f"<b>Anlık Fiyat:</b> {price_str}",
         f"<b>Sinyal Güveni:</b> %{conf}",
         f"<b>Canlı Fonlama Oranı:</b> %{sig['funding']*100:.4f}",
         "---",
         "<b>🔎 CAPITANO ANALİZ RAPORU:</b>"
     ]
     
-    for name, detail, score in sig["factors"]:
-        if score != 0:
-            arrow = "✅" if score > 0 else "❌"
-            lines.append(f"{arrow} <b>{html_escape(name)}:</b> {html_escape(detail)}")
+    # Tüm indikatörleri sırasıyla ve durum emojileriyle basıyoruz
+    for name, data in sig["report_data"].items():
+        arrow = "⚪"
+        if data["status"] == "bullish":
+            arrow = "✅"
+        elif data["status"] == "bearish":
+            arrow = "❌"
+            
+        lines.append(f"{arrow} <b>{html_escape(name)}:</b> {html_escape(data['detail'])}")
         
     lines.append("\n⚠️ <i>Grafiğini açıp mutlaka Price Action teyidi al Onur!</i>")
     return "\n".join(lines)
@@ -560,39 +568,34 @@ def single_scan(state, watchlist):
 
 def main():
     start_time = time.time()
-    # GitHub Actions maksimum 6 saat çalışabilir. 5.5 saatte (19800 saniye) döngüyü sonlandırıp nöbeti devredelim.
     MAX_RUN_TIME = 5.5 * 60 * 60 
-    INTERVAL = 15 * 60  # Tam 15 dakika (900 saniye)
+    INTERVAL = 15 * 60  
     
     print("🚀 Capitano Zaman Koruyucu Döngüsü Aktif Edildi.")
     
     while True:
         loop_start = time.time()
         
-        # 5.5 saat doldu mu?
         if loop_start - start_time > MAX_RUN_TIME:
-            print("⏳ 5.5 saatlik maksimum oturum süresi doldu. Sistem sonraki otomatik tetikleme için kapanıyor.")
+            print("⏳ Oturum süresi doldu. Sistem yeniden başlatılıyor...")
             break
             
         watchlist = load_json(WATCHLIST_FILE, ["ALL"])
         state = load_json(STATE_FILE, {"last_update_id": 0, "last_signals": {}})
         state.setdefault("last_signals", {})
         
-        # Döngü başında Telegram komutlarını oku ve listeyi güncelle
         try:
             watchlist, state = process_commands(state, watchlist)
             save_json(WATCHLIST_FILE, watchlist)
         except Exception as e:
             print(f"⚠️ Komut işleme hatası: {e}")
             
-        # Taramayı yap
         single_scan(state, watchlist)
         
-        # Kodun harcadığı süreyi hesapla, tam 15 dakikaya tamamlayacak kadar uyu
         elapsed = time.time() - loop_start
         sleep_time = max(10, INTERVAL - elapsed)
         
-        print(f"💤 Tarama tamamlandı. Bir sonraki periyot için {int(sleep_time)} saniye geri sayım başladı...\n")
+        print(f"💤 Tarama tamamlandı. {int(sleep_time)} saniye bekleniyor...\n")
         time.sleep(sleep_time)
 
 
