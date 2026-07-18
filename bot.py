@@ -1,8 +1,10 @@
 """
-Kesişim Radar - "Capitano Volume Pro v3.2" (Hacim ve Trend Odaklı)
-- EMA 50/200, Günlük Pivotlar, RSI/MACD, OKX Funding Rate.
-- MTF (1h Trend Onayı).
-- ÖZELFİLTRE: "Hakikatli Hacim Artışı" ve Saf Teknik Veri (TP/SL kaldırıldı).
+Kesişim Radar - "Capitano Master Radar v4.0" (Çok Boyutlu Röntgen)
+- EMA 50/200 & Günlük Pivotlar (PP, R1, S1 vb.)
+- RSI, MACD ve OKX Canlı Fonlama (Funding Rate)
+- Vadeli Açık Pozisyon (Open Interest - OI) Değişimi (Long/Short Giriş Baskısı)
+- Hacim Girişi (Organik Akümülasyon Ölçümü)
+- TEK BİR VERİYE BAĞLI KALMAZ: Her veriyi bağımsız analiz edip tam rapor sunar.
 """
 
 import json
@@ -28,7 +30,7 @@ POPULAR_USDT_SYMBOLS = [
 ]
 
 TIMEFRAME = "15m"
-MIN_CONFIDENCE_TO_NOTIFY = 35
+MIN_CONFIDENCE_TO_NOTIFY = 30  # Çok yönlü analizde bariyeri esnetiyoruz ki fırsat kaçmasın
 
 OKX_API_URLS = [
     "https://www.okx.cab",
@@ -109,7 +111,17 @@ def fetch_funding_rate_okx(symbol):
     except Exception:
         return 0.0
 
-# ============================= Matematik Motoru =============================
+def fetch_open_interest_okx(symbol):
+    """Vadeli piyasadaki anlık Açık Pozisyon (Open Interest) miktarını çeker"""
+    try:
+        data = http_get_json(f"/api/v5/public/open-interest?instId={symbol}-SWAP&instType=SWAP")
+        if data.get("code") == "0" and data.get("data"):
+            return float(data["data"][0]["oiCcy"])  # Coin cinsinden toplam açık pozisyon
+    except Exception:
+        pass
+    return 0.0
+
+# ============================= Matematik ve Göstergeler =============================
 
 def calc_ema(closes, period):
     if len(closes) < period: return []
@@ -146,116 +158,117 @@ def classic_pivots(h, l, c):
     pp = (h + l + c) / 3
     return [("R3", h + 2*(pp - l)), ("R2", pp + (h - l)), ("R1", 2*pp - l), ("PP", pp), ("S1", 2*pp - h), ("S2", pp - (h - l)), ("S3", l - 2*(h - pp))]
 
-# ============================= Hakikatli Hacim Filtresi =============================
+# ============================= Gelişmiş Röntgen Motoru =============================
 
-def check_real_volume(candles):
-    """Anlık feyk hacimleri değil, maldaki hakikatli hacim artışını ölçer"""
-    if len(candles) < 30: return True, 1.0
-    
-    # Son 3 mumun hacim ortalaması (Mala taze giren para akışı)
-    recent_vol = sum(c["volume"] for c in candles[-3:]) / 3
-    # Önceki 25 mumun hacim ortalaması (Malın normal yatak hacmi)
-    base_vol = sum(c["volume"] for c in candles[-28:-3]) / 25
-    
-    if base_vol == 0: return True, 1.0
-    ratio = recent_vol / base_vol
-    
-    # Son dönem ortalamasının en az 1.7 katı kalıcı hacim girişi şartı
-    return ratio >= 1.7, ratio
-
-def check_1h_trend(symbol, direction):
-    try:
-        candles_1h = fetch_klines_okx(symbol, timeframe="1h", limit=60)
-        if len(candles_1h) < 50: return True
-        closes_1h = [c["close"] for c in candles_1h]
-        ema50_1h_list = calc_ema(closes_1h, 50)
-        if not ema50_1h_list: return True
-        ema50_1h = ema50_1h_list[-1]
-        price = closes_1h[-1]
-        if direction == "AL" and price < ema50_1h: return False
-        if direction == "SAT" and price > ema50_1h: return False
-        return True
-    except Exception:
-        return True
-
-# ============================= Karar Motoru =============================
-
-def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
+def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, current_oi, state):
     if len(candles) < 50: return None
     
-    # Hakikatli Hacim Filtresi Tetiklenmesi
-    is_real_volume, vol_ratio = check_real_volume(candles)
-    if not is_real_volume: return None 
-
     last = candles[-1]
     price = last["close"]
     closes = [c["close"] for c in candles]
     
+    # 1. Hacim Analizi (Kilitlenmeden, sadece durum tespiti)
+    recent_vol = sum(c["volume"] for c in candles[-3:]) / 3
+    base_vol = sum(c["volume"] for c in candles[-28:-3]) / 25
+    vol_ratio = recent_vol / base_vol if base_vol > 0 else 1.0
+    
+    # 2. Open Interest (Açık Pozisyon) Takibi (Long/Short Para Girişi)
+    oi_key = f"oi_{symbol}"
+    prev_oi = state.get(oi_key, current_oi)
+    state[oi_key] = current_oi # Bir sonraki tur için sakla
+    
+    oi_change_pct = 0.0
+    if prev_oi > 0:
+        oi_change_pct = ((current_oi - prev_oi) / prev_oi) * 100
+
+    # Varsayılan Rapor Yapısı (Her İndikatör Bağımsız Güç Üretir)
     report_data = {
-        "Hacim Girişi": {"detail": f"Organik Para Girişi Aktif (Ort. x{vol_ratio:.1f}) 🔥", "score": 20, "status": "bullish"},
-        "EMA Yapısı": {"detail": "Hesaplanamadı", "score": 0, "status": "neutral"},
+        "Hacim Durumu": {"detail": f"Nötr Yatay (x{vol_ratio:.1f})", "score": 0, "status": "neutral"},
+        "Açık Pozisyon (OI)": {"detail": "OI Sabit", "score": 0, "status": "neutral"},
+        "EMA Yapısı": {"detail": "Nötr / Kesişim Yok", "score": 0, "status": "neutral"},
         "Pivot Analizi": {"detail": "Pivot verisi eksik", "score": 0, "status": "neutral"},
-        "RSI": {"detail": "Hesaplanamadı", "score": 0, "status": "neutral"},
-        "MACD": {"detail": "Kesişim yok (Nötr) ⚪", "score": 0, "status": "neutral"},
-        "Funding Rate": {"detail": "Dengeli", "score": 0, "status": "neutral"}
+        "RSI Göstergesi": {"detail": "Nötr bölge", "score": 0, "status": "neutral"},
+        "MACD Trendi": {"detail": "Kesişim Yok ⚪", "score": 0, "status": "neutral"},
+        "Fonlama Oranı": {"detail": "Dengeli", "score": 0, "status": "neutral"}
     }
 
+    # Hacim Skorlama
+    if vol_ratio >= 1.7:
+        report_data["Hacim Durumu"] = {"detail": f"Kalıcı Hacim Artışı Var (x{vol_ratio:.1f}) 🔥", "score": 25, "status": "bullish"}
+    elif vol_ratio <= 0.6:
+        report_data["Hacim Durumu"] = {"detail": f"Hacim Çok Kurudu (x{vol_ratio:.1f})", "score": -5, "status": "bearish"}
+
+    # Open Interest Skorlama (İçeri taze kaldıraçlı para giriyor mu?)
+    if oi_change_pct >= 1.5:
+        report_data["Açık Pozisyon (OI)"] = {"detail": f"Vadeliye Agresif Giriş Var (+%{oi_change_pct:.2f}) ⚡", "score": 20, "status": "bullish"}
+    elif oi_change_pct <= -1.5:
+        report_data["Açık Pozisyon (OI)"] = {"detail": f"Pozisyonlar Kapatılıyor (-%{oi_change_pct:.2f}) 📉", "score": -10, "status": "bearish"}
+
+    # EMA Skorlama
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
-    if ema50:
-        e50_last = ema50[-1]
-        if ema200:
-            e50_prev, e200_last, e200_prev = ema50[-2], ema200[-1], ema200[-2]
-            if e50_prev <= e200_prev and e50_last > e200_last: report_data["EMA Yapısı"] = {"detail": "Golden Cross Kesişimi 🚀", "score": 50, "status": "bullish"}
-            elif e50_prev >= e200_prev and e50_last < e200_last: report_data["EMA Yapısı"] = {"detail": "Death Cross Kesişimi 💀", "score": -50, "status": "bearish"}
-            else:
-                if price > e50_last and price > e200_last: report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 üzerinde (Güçlü)", "score": 25, "status": "bullish"}
-                elif price < e50_last and price < e200_last: report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 altında (Zayıf)", "score": -25, "status": "bearish"}
+    if ema50 and ema200:
+        e50_last, e200_last = ema50[-1], ema200[-1]
+        e50_prev, e200_prev = ema50[-2], ema200[-2]
+        
+        if e50_prev <= e200_prev and e50_last > e200_last:
+            report_data["EMA Yapısı"] = {"detail": "Golden Cross Kesişimi Uçtu! 🚀", "score": 45, "status": "bullish"}
+        elif e50_prev >= e200_prev and e50_last < e200_last:
+            report_data["EMA Yapısı"] = {"detail": "Death Cross Kesişimi Düştü! 💀", "score": -45, "status": "bearish"}
         else:
-            report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 üzerinde" if price > e50_last else "Fiyat EMA 50 altında", "score": 15 if price > e50_last else -15, "status": "bullish" if price > e50_last else "bearish"}
+            if price > e50_last and price > e200_last:
+                report_data["EMA Yapısı"] = {"detail": f"Fiyat Trend Üstü Akümüle (EMA50: {e50_last:.2f})", "score": 20, "status": "bullish"}
+            elif price < e50_last and price < e200_last:
+                report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 Altında Sıkışık", "score": -20, "status": "bearish"}
 
+    # Pivot Analizi (Fiyat Pivot'un neresinde?)
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = min([(n, abs(price - l)/l*100) for n, l in pivots], key=lambda x: x[1])
         pp_level = [v for k, v in pivots if k == "PP"][0]
-        is_above = price > pp_level
-        report_data["Pivot Analizi"] = {"detail": f"Fiyat PP {'üzerinde' if is_above else 'altında'}. {nearest_name} (%{nearest_dist:.2f})", "score": 15 if is_above else -15, "status": "bullish" if is_above else "bearish"}
+        
+        if price > pp_level:
+            report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Üzerinde Güçlü. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": 15, "status": "bullish"}
+        else:
+            report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Altında Baskılı. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": -15, "status": "bearish"}
 
+    # RSI Skorlama (20 altı aşırı satım yakalama)
     rsi_vals = calc_rsi(closes)
     if rsi_vals:
         curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
-        if curr_rsi <= 25: report_data["RSI"] = {"detail": f"Aşırı Satım (%{curr_rsi:.1f})", "score": 20, "status": "bullish"}
-        elif prev_rsi < 30 and curr_rsi > prev_rsi: report_data["RSI"] = {"detail": f"Dipten Dönüş (%{curr_rsi:.1f}) 📈", "score": 30, "status": "bullish"}
-        elif curr_rsi >= 75: report_data["RSI"] = {"detail": f"Aşırı Alım (%{curr_rsi:.1f})", "score": -20, "status": "bearish"}
-        elif prev_rsi > 70 and curr_rsi < prev_rsi: report_data["RSI"] = {"detail": f"Tepeden Dönüş (%{curr_rsi:.1f}) 📉", "score": -30, "status": "bearish"}
-        else: report_data["RSI"] = {"detail": f"Nötr bölgede (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
+        if curr_rsi <= 25:
+            report_data["RSI Göstergesi"] = {"detail": f"Dip Seviyede! Aşırı Satım (%{curr_rsi:.1f}) 🚨", "score": 35, "status": "bullish"}
+        elif prev_rsi < 30 and curr_rsi > prev_rsi:
+            report_data["RSI Göstergesi"] = {"detail": f"Dipten Kafayı Kaldırdı (%{curr_rsi:.1f}) 📈", "score": 25, "status": "bullish"}
+        elif curr_rsi >= 75:
+            report_data["RSI Göstergesi"] = {"detail": f"Tepe Seviyede! Aşırı Alım (%{curr_rsi:.1f}) ⚠️", "score": -35, "status": "bearish"}
+        else:
+            report_data["RSI Göstergesi"] = {"detail": f"Nötr Bölgede Salınıyor (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
 
+    # MACD Skorlama
     m_line, s_line = calc_macd(closes)
     if len(m_line) >= 2 and len(s_line) >= 2:
-        if m_line[-2] <= s_line[-2] and m_line[-1] > s_line[-1]: report_data["MACD"] = {"detail": "Aşağıdan Yukarı Kesti (AL) 🟢", "score": 20, "status": "bullish"}
-        elif m_line[-2] >= s_line[-2] and m_line[-1] < s_line[-1]: report_data["MACD"] = {"detail": "Yukarıdan Aşağı Kesti (SAT) 🔴", "score": -20, "status": "bearish"}
-        else: report_data["MACD"] = {"detail": "Kesişim Yok (Yatay) ⚪", "score": 0, "status": "neutral"}
+        if m_line[-2] <= s_line[-2] and m_line[-1] > s_line[-1]:
+            report_data["MACD Trendi"] = {"detail": "Aşağıdan Yukarı Net Kesti (AL) 🟢", "score": 25, "status": "bullish"}
+        elif m_line[-2] >= s_line[-2] and m_line[-1] < s_line[-1]:
+            report_data["MACD Trendi"] = {"detail": "Yukarıdan Aşağı Net Kesti (SAT) 🔴", "score": -25, "status": "bearish"}
 
+    # Fonlama Oranı Skorlama
     if funding_rate != 0.0:
-        if funding_rate >= 0.0005: report_data["Funding Rate"] = {"detail": f"Yüksek Fonlama (%{funding_rate*100:.3f}) ⚠️", "score": -15, "status": "bearish"}
-        elif funding_rate <= -0.0005: report_data["Funding Rate"] = {"detail": f"Yüksek Negatif (%{funding_rate*100:.3f}) 🚀", "score": 15, "status": "bullish"}
-        else: report_data["Funding Rate"] = {"detail": f"Dengeli (%{funding_rate*100:.4f})", "score": 0, "status": "neutral"}
+        if funding_rate >= 0.0005:
+            report_data["Fonlama Oranı"] = {"detail": f"Yüksek Long Baskısı var (%{funding_rate*100:.3f})", "score": -10, "status": "bearish"}
+        elif funding_rate <= -0.0005:
+            report_data["Fonlama Oranı"] = {"detail": f"Yüksek Short Baskısı / Squeeze Potansiyeli! (%{funding_rate*100:.3f}) 🚀", "score": 20, "status": "bullish"}
 
+    # Skor Toplama ve Yön Tayini
     raw_score = sum(v["score"] for v in report_data.values())
-    if btc_state:
-        if btc_state["trend"] == "bearish" and raw_score > 0: raw_score *= 0.5
-        elif btc_state["trend"] == "bullish" and raw_score < 0: raw_score *= 0.5
-
     confidence = min(100, abs(raw_score))
+    
     direction = "IZLE"
     if confidence >= MIN_CONFIDENCE_TO_NOTIFY:
         direction = "AL" if raw_score > 0 else "SAT"
 
-    if direction == "IZLE": return None
-
-    # MTF 1 Saatlik Zaman Dilimi Filtresi
-    if not check_1h_trend(symbol, direction):
-        print(f"⏩ {symbol} 15m sinyali, 1h ana trendi ile uyuşmadığı için elendi.")
+    if direction == "IZLE": 
         return None
 
     return {
@@ -264,27 +277,27 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate):
     }
 
 def format_signal_message(sig):
-    emoji = "🟢 [LONG ADAYI]" if sig["direction"] == "AL" else "🔴 [SHORT ADAYI]"
+    emoji = "🟢 [BOĞA RADARI]" if sig["direction"] == "AL" else "🔴 [AYI RADARI]"
     clean_sym = sig['symbol'].replace("-", "")
     price_val = sig['price']
     fmt = ".8f" if price_val < 1.0 else ".2f"
     
     lines = [
         f"{emoji} <b>#{clean_sym}</b>",
-        f"<b>Anlık Fiyat:</b> {price_val:{fmt}}",
-        f"<b>Sinyal Güveni:</b> %{int(sig['confidence'])}",
+        f"<b>Güncel Fiyat:</b> {price_val:{fmt}}",
+        f"<b>Radar Gücü:</b> %{int(sig['confidence'])}",
         f"<b>Canlı Fonlama Oranı:</b> %{sig['funding']*100:.4f}",
         "---",
-        "<b>🔎 CAPITANO ANALİZ RAPORU:</b>"
+        "<b>🔎 MULTİ-DİSİPLİNER TAHTA RÖNTGENİ:</b>"
     ]
     for name, data in sig["report_data"].items():
         arrow = "✅" if data["status"] == "bullish" else ("❌" if data["status"] == "bearish" else "⚪")
         lines.append(f"{arrow} <b>{html_escape(name)}:</b> {html_escape(data['detail'])}")
         
-    lines.append("\n⚠️ <i>Grafiğini açıp mutlaka Price Action teyidi al Onur!</i>")
+    lines.append("\n💡 <i>Şimdi stratejini konuşturma zamanı Onur. Tüm harita yukarıda!</i>")
     return "\n".join(lines)
 
-# ============================= Altyapı Döngüsü =============================
+# ============================= Altyapı Döngü Yönetimi =============================
 
 def process_commands(state, watchlist):
     offset = state.get("last_update_id", 0) + 1
@@ -332,14 +345,16 @@ def save_json(path, data):
 def single_scan(state, watchlist):
     btc_state = get_btc_state()
     symbols = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
-    print(f"🔄 Hacim Odaklı Tarama: {len(symbols)} sembol taranıyor...")
+    print(f"🔄 Çok Boyutlu Röntgen Taraması: {len(symbols)} sembol taranıyor...")
     for symbol in symbols:
         try:
             time.sleep(0.3)
             candles = fetch_klines_okx(symbol)
             prev_daily = fetch_prev_daily_okx(symbol)
             funding_rate = fetch_funding_rate_okx(symbol)
-            sig = generate_signal(symbol, candles, prev_daily, btc_state, funding_rate)
+            current_oi = fetch_open_interest_okx(symbol)
+            
+            sig = generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, current_oi, state)
             if not sig: continue
             
             prev_dir = state["last_signals"].get(symbol)
