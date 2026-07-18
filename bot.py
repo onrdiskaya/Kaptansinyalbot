@@ -4,7 +4,6 @@ Kesişim Radar - "Capitano Master Radar v4.0" (Çok Boyutlu Röntgen)
 - RSI, MACD ve OKX Canlı Fonlama (Funding Rate)
 - Vadeli Açık Pozisyon (Open Interest - OI) Değişimi (Long/Short Giriş Baskısı)
 - Hacim Girişi (Organik Akümülasyon Ölçümü)
-- TEK BİR VERİYE BAĞLI KALMAZ: Her veriyi bağımsız analiz edip tam rapor sunar.
 """
 
 import json
@@ -15,7 +14,7 @@ import urllib.request
 import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = "-1004380356334" 
+TELEGRAM_CHAT_ID = "-1004339033046" # Güncel Capitano Market Radar ID'si
 
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
@@ -71,6 +70,7 @@ def telegram_api(method, params=None):
         return {}
 
 def send_message(text):
+    # message_thread_id satırı temizlendi, genel akışa yollar.
     params = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -324,4 +324,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
