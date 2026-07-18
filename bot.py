@@ -15,7 +15,7 @@ import urllib.request
 import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = "-1004380356334" # Güncellendi
+TELEGRAM_CHAT_ID = "-1004380356334" 
 
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
@@ -74,8 +74,7 @@ def send_message(text):
     params = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML",
-        "message_thread_id": 4
+        "parse_mode": "HTML"
     }
     telegram_api("sendMessage", params)
 
@@ -325,3 +324,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
