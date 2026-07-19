@@ -1,9 +1,10 @@
 """
-Kesişim Radar - "Capitano Master Radar v4.0" (Çok Boyutlu Röntgen)
-- ÇOKLU ZAMAN DİLİMİ EKLENDİ (15m, 1H, 4H, 1D)
+Kesişim Radar - "Capitano Master Radar v4.5" (Fibonacci & Akıllı Filtre)
+- ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - HASSAS FONLAMA ORANI ALGORİTMASI
 - AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI)
-- EMA 50/200 & Günlük Pivotlar (PP, R1, S1 vb.)
+- FİBONACCİ PİVOTLARI (TradingView Birebir Uyumlu)
+- BTC KORELASYON FİLTRESİ & Yüksek Seçicilik (45)
 - RSI, MACD ve Vadeli Açık Pozisyon (OI)
 """
 
@@ -30,7 +31,7 @@ POPULAR_USDT_SYMBOLS = [
 ]
 
 TIMEFRAMES = ["15m", "1H", "4H", "1Dutc"]
-MIN_CONFIDENCE_TO_NOTIFY = 30
+MIN_CONFIDENCE_TO_NOTIFY = 45 # Baraj 45'e çıkarıldı
 
 OKX_API_URLS = [
     "https://www.okx.cab",
@@ -156,9 +157,19 @@ def calc_macd(closes):
     macd_line = [e12 - e26 for e12, e26 in zip(ema12[-n:], ema26[-n:])]
     return macd_line, calc_ema(macd_line, 9)
 
-def classic_pivots(h, l, c):
+# YENİ FİBONACCİ PİVOT FONKSİYONU
+def fibonacci_pivots(h, l, c):
     pp = (h + l + c) / 3
-    return [("R3", h + 2*(pp - l)), ("R2", pp + (h - l)), ("R1", 2*pp - l), ("PP", pp), ("S1", 2*pp - h), ("S2", pp - (h - l)), ("S3", l - 2*(h - pp))]
+    r = h - l
+    return [
+        ("R3", pp + (r * 1.000)), 
+        ("R2", pp + (r * 0.618)), 
+        ("R1", pp + (r * 0.382)), 
+        ("PP", pp), 
+        ("S1", pp - (r * 0.382)), 
+        ("S2", pp - (r * 0.618)), 
+        ("S3", pp - (r * 1.000))
+    ]
 
 def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_rate, current_oi, state):
     if len(candles) < 50: return None
@@ -216,7 +227,8 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         elif price < e50_last and price < e200_last: report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 Altında Sıkışık", "score": -20, "status": "bearish"}
         
     if prev_daily:
-        pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
+        # PİVOT HESAPLAMASI FİBONACCİ'YE ÇEVRİLDİ
+        pivots = fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = min([(n, abs(price - l)/l*100) for n, l in pivots], key=lambda x: x[1])
         pp_level = [v for k, v in pivots if k == "PP"][0]
         if price > pp_level: report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Üzerinde Güçlü. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": 15, "status": "bullish"}
@@ -242,6 +254,11 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
             report_data["Fonlama Oranı"] = {"detail": f"Short Baskısı / Squeeze (Patlatma) Potansiyeli! (%{funding_rate*100:.4f}) 🚀", "score": 20, "status": "bullish"}
         
     raw_score = sum(v["score"] for v in report_data.values())
+    
+    # YENİ BTC KORELASYON FİLTRESİ
+    if btc_state and btc_state.get("trend") == "bearish" and raw_score > 0:
+        raw_score -= 20 # BTC düşerken gelen "Al" sinyaline -20 ceza kesiyoruz.
+    
     confidence = min(100, abs(raw_score))
     direction = "IZLE"
     if confidence >= MIN_CONFIDENCE_TO_NOTIFY: direction = "AL" if raw_score > 0 else "SAT"
