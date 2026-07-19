@@ -1,10 +1,10 @@
 """
 Kesişim Radar - "Capitano Master Radar v4.0" (Çok Boyutlu Röntgen)
 - ÇOKLU ZAMAN DİLİMİ EKLENDİ (15m, 1H, 4H, 1D)
+- HASSAS FONLAMA ORANI ALGORİTMASI
+- AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI)
 - EMA 50/200 & Günlük Pivotlar (PP, R1, S1 vb.)
-- RSI, MACD ve OKX Canlı Fonlama (Funding Rate)
-- Vadeli Açık Pozisyon (Open Interest - OI) Değişimi (Long/Short Giriş Baskısı)
-- Hacim Girişi (Organik Akümülasyon Ölçümü)
+- RSI, MACD ve Vadeli Açık Pozisyon (OI)
 """
 
 import json
@@ -29,8 +29,6 @@ POPULAR_USDT_SYMBOLS = [
     "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
-# YENİ: Tek bir zaman dilimi yerine bir liste oluşturduk. 
-# Bot sırayla bu periyotların hepsini tarayacak.
 TIMEFRAMES = ["15m", "1H", "4H", "1Dutc"]
 MIN_CONFIDENCE_TO_NOTIFY = 30
 
@@ -167,11 +165,17 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
     last = candles[-1]
     price = last["close"]
     closes = [c["close"] for c in candles]
+    
+    # Hacim Oranı Hesaplama
     recent_vol = sum(c["volume"] for c in candles[-3:]) / 3
     base_vol = sum(c["volume"] for c in candles[-28:-3]) / 25
     vol_ratio = recent_vol / base_vol if base_vol > 0 else 1.0
     
-    # OI her zaman diliminde aynıdır, sadece sembol bazlı tutulur
+    # AKILLI HACİM: Son 3 mumun geneli Alış yönlü mü Satış yönlü mü?
+    price_start = candles[-3]["open"]
+    price_end = candles[-1]["close"]
+    is_bullish_vol = price_end >= price_start
+    
     oi_key = f"oi_{symbol}"
     prev_oi = state.get(oi_key, current_oi)
     state[oi_key] = current_oi
@@ -186,11 +190,17 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         "Pivot Analizi": {"detail": "Pivot verisi eksik", "score": 0, "status": "neutral"},
         "RSI Göstergesi": {"detail": "Nötr bölge", "score": 0, "status": "neutral"},
         "MACD Trendi": {"detail": "Kesişim Yok ⚪", "score": 0, "status": "neutral"},
-        "Fonlama Oranı": {"detail": "Dengeli", "score": 0, "status": "neutral"}
+        "Fonlama Oranı": {"detail": f"Dengeli (%{funding_rate*100:.4f})", "score": 0, "status": "neutral"}
     }
     
-    if vol_ratio >= 1.7: report_data["Hacim Durumu"] = {"detail": f"Kalıcı Hacim Artışı Var (x{vol_ratio:.1f}) 🔥", "score": 25, "status": "bullish"}
-    elif vol_ratio <= 0.6: report_data["Hacim Durumu"] = {"detail": f"Hacim Çok Kurudu (x{vol_ratio:.1f})", "score": -5, "status": "bearish"}
+    # Yeni Hacim Karar Mekanizması
+    if vol_ratio >= 1.7:
+        if is_bullish_vol:
+            report_data["Hacim Durumu"] = {"detail": f"Güçlü ALIM Hacmi Girişi (x{vol_ratio:.1f}) 🟢", "score": 25, "status": "bullish"}
+        else:
+            report_data["Hacim Durumu"] = {"detail": f"Sert SATIŞ Hacmi / Mal Boşaltma (x{vol_ratio:.1f}) 🩸", "score": -25, "status": "bearish"}
+    elif vol_ratio <= 0.6: 
+        report_data["Hacim Durumu"] = {"detail": f"Hacim Çok Kurudu (x{vol_ratio:.1f}) 🏜️", "score": -5, "status": "bearish"}
     
     if oi_change_pct >= 1.5: report_data["Açık Pozisyon (OI)"] = {"detail": f"Vadeliye Agresif Giriş Var (+%{oi_change_pct:.2f}) ⚡", "score": 20, "status": "bullish"}
     elif oi_change_pct <= -1.5: report_data["Açık Pozisyon (OI)"] = {"detail": f"Pozisyonlar Kapatılıyor (-%{oi_change_pct:.2f}) 📉", "score": -10, "status": "bearish"}
@@ -226,8 +236,10 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         elif m_line[-2] >= s_line[-2] and m_line[-1] < s_line[-1]: report_data["MACD Trendi"] = {"detail": "Yukarıdan Aşağı Net Kesti (SAT) 🔴", "score": -25, "status": "bearish"}
         
     if funding_rate != 0.0:
-        if funding_rate >= 0.0005: report_data["Fonlama Oranı"] = {"detail": f"Yüksek Long Baskısı var (%{funding_rate*100:.3f})", "score": -10, "status": "bearish"}
-        elif funding_rate <= -0.0005: report_data["Fonlama Oranı"] = {"detail": f"Yüksek Short Baskısı / Squeeze Potansiyeli! (%{funding_rate*100:.3f}) 🚀", "score": 20, "status": "bullish"}
+        if funding_rate >= 0.0002: 
+            report_data["Fonlama Oranı"] = {"detail": f"Long Baskısı / Piyasada Isınma Var (%{funding_rate*100:.4f}) ⚠️", "score": -10, "status": "bearish"}
+        elif funding_rate <= -0.00015: 
+            report_data["Fonlama Oranı"] = {"detail": f"Short Baskısı / Squeeze (Patlatma) Potansiyeli! (%{funding_rate*100:.4f}) 🚀", "score": 20, "status": "bullish"}
         
     raw_score = sum(v["score"] for v in report_data.values())
     confidence = min(100, abs(raw_score))
@@ -235,7 +247,6 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
     if confidence >= MIN_CONFIDENCE_TO_NOTIFY: direction = "AL" if raw_score > 0 else "SAT"
     if direction == "IZLE": return None
     
-    # YENİ: Zaman dilimini (timeframe) sinyal verisine ekliyoruz.
     return {"symbol": symbol, "timeframe": timeframe, "direction": direction, "confidence": confidence, "price": price, "report_data": report_data, "funding": funding_rate}
 
 def format_signal_message(sig):
@@ -244,7 +255,6 @@ def format_signal_message(sig):
     price_val = sig['price']
     fmt = ".8f" if price_val < 1.0 else ".2f"
     
-    # Zaman dilimini Türkçe ve güzel okunan bir formata çeviriyoruz
     tf_str = sig['timeframe'].replace("15m", "15 Dakikalık").replace("1H", "1 Saatlik").replace("4H", "4 Saatlik").replace("1Dutc", "1 Günlük")
     
     lines = [
@@ -285,7 +295,7 @@ def process_commands(state, watchlist):
 
 def get_btc_state():
     try:
-        res = fetch_klines_okx("BTC-USDT", timeframe="1H") # Trend kontrolü için 1 Saatlik baz alınır
+        res = fetch_klines_okx("BTC-USDT", timeframe="1H")
         if not res or len(res) < 200: return None
         closes = [c["close"] for c in res]
         e200 = calc_ema(closes, 200)[-1]
@@ -309,11 +319,10 @@ def single_scan(state, watchlist):
     symbols = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
     print(f"🔄 Çok Boyutlu Röntgen Taraması: {len(symbols)} sembol taranıyor...")
     
-    # YENİ: Önce sembolleri dönüyoruz, sonra her sembol için zaman dilimlerini tarıyoruz.
     for symbol in symbols:
         for tf in TIMEFRAMES:
             try:
-                time.sleep(0.3) # API limitine takılmamak için hafif bekleme
+                time.sleep(0.3)
                 candles = fetch_klines_okx(symbol, timeframe=tf)
                 prev_daily = fetch_prev_daily_okx(symbol)
                 funding_rate = fetch_funding_rate_okx(symbol)
@@ -322,7 +331,6 @@ def single_scan(state, watchlist):
                 sig = generate_signal(symbol, tf, candles, prev_daily, btc_state, funding_rate, current_oi, state)
                 if not sig: continue
                 
-                # Hafıza sistemi: Her sembol ve her zaman dilimi için ayrı kayıt tutar. (Örn: BTC-USDT_1H)
                 state_key = f"{symbol}_{tf}"
                 prev_dir = state["last_signals"].get(state_key)
                 
