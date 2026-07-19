@@ -1,5 +1,6 @@
 """
 Kesişim Radar - "Capitano Master Radar v4.0" (Çok Boyutlu Röntgen)
+- ÇOKLU ZAMAN DİLİMİ EKLENDİ (15m, 1H, 4H, 1D)
 - EMA 50/200 & Günlük Pivotlar (PP, R1, S1 vb.)
 - RSI, MACD ve OKX Canlı Fonlama (Funding Rate)
 - Vadeli Açık Pozisyon (Open Interest - OI) Değişimi (Long/Short Giriş Baskısı)
@@ -28,7 +29,9 @@ POPULAR_USDT_SYMBOLS = [
     "FLOKI-USDT", "BONK-USDT", "JUP-USDT"
 ]
 
-TIMEFRAME = "15m"
+# YENİ: Tek bir zaman dilimi yerine bir liste oluşturduk. 
+# Bot sırayla bu periyotların hepsini tarayacak.
+TIMEFRAMES = ["15m", "1H", "4H", "1Dutc"]
 MIN_CONFIDENCE_TO_NOTIFY = 30
 
 OKX_API_URLS = [
@@ -70,7 +73,6 @@ def telegram_api(method, params=None):
         return {}
 
 def send_message(text):
-    # message_thread_id satırı temizlendi, genel akışa yollar.
     params = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -78,7 +80,7 @@ def send_message(text):
     }
     telegram_api("sendMessage", params)
 
-def fetch_klines_okx(symbol, timeframe=TIMEFRAME, limit=250):
+def fetch_klines_okx(symbol, timeframe, limit=250):
     path = f"/api/v5/market/candles?instId={symbol}&bar={timeframe}&limit={limit}"
     raw_list = None
     try:
@@ -160,7 +162,7 @@ def classic_pivots(h, l, c):
     pp = (h + l + c) / 3
     return [("R3", h + 2*(pp - l)), ("R2", pp + (h - l)), ("R1", 2*pp - l), ("PP", pp), ("S1", 2*pp - h), ("S2", pp - (h - l)), ("S3", l - 2*(h - pp))]
 
-def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, current_oi, state):
+def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_rate, current_oi, state):
     if len(candles) < 50: return None
     last = candles[-1]
     price = last["close"]
@@ -168,12 +170,15 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, curren
     recent_vol = sum(c["volume"] for c in candles[-3:]) / 3
     base_vol = sum(c["volume"] for c in candles[-28:-3]) / 25
     vol_ratio = recent_vol / base_vol if base_vol > 0 else 1.0
+    
+    # OI her zaman diliminde aynıdır, sadece sembol bazlı tutulur
     oi_key = f"oi_{symbol}"
     prev_oi = state.get(oi_key, current_oi)
     state[oi_key] = current_oi
     oi_change_pct = 0.0
     if prev_oi > 0:
         oi_change_pct = ((current_oi - prev_oi) / prev_oi) * 100
+        
     report_data = {
         "Hacim Durumu": {"detail": f"Nötr Yatay (x{vol_ratio:.1f})", "score": 0, "status": "neutral"},
         "Açık Pozisyon (OI)": {"detail": "OI Sabit", "score": 0, "status": "neutral"},
@@ -183,10 +188,13 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, curren
         "MACD Trendi": {"detail": "Kesişim Yok ⚪", "score": 0, "status": "neutral"},
         "Fonlama Oranı": {"detail": "Dengeli", "score": 0, "status": "neutral"}
     }
+    
     if vol_ratio >= 1.7: report_data["Hacim Durumu"] = {"detail": f"Kalıcı Hacim Artışı Var (x{vol_ratio:.1f}) 🔥", "score": 25, "status": "bullish"}
     elif vol_ratio <= 0.6: report_data["Hacim Durumu"] = {"detail": f"Hacim Çok Kurudu (x{vol_ratio:.1f})", "score": -5, "status": "bearish"}
+    
     if oi_change_pct >= 1.5: report_data["Açık Pozisyon (OI)"] = {"detail": f"Vadeliye Agresif Giriş Var (+%{oi_change_pct:.2f}) ⚡", "score": 20, "status": "bullish"}
     elif oi_change_pct <= -1.5: report_data["Açık Pozisyon (OI)"] = {"detail": f"Pozisyonlar Kapatılıyor (-%{oi_change_pct:.2f}) 📉", "score": -10, "status": "bearish"}
+    
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     if ema50 and ema200:
@@ -196,12 +204,14 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, curren
         elif e50_prev >= e200_prev and e50_last < e200_last: report_data["EMA Yapısı"] = {"detail": "Death Cross Kesişimi Düştü! 💀", "score": -45, "status": "bearish"}
         elif price > e50_last and price > e200_last: report_data["EMA Yapısı"] = {"detail": f"Fiyat Trend Üstü Akümüle (EMA50: {e50_last:.2f})", "score": 20, "status": "bullish"}
         elif price < e50_last and price < e200_last: report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 Altında Sıkışık", "score": -20, "status": "bearish"}
+        
     if prev_daily:
         pivots = classic_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = min([(n, abs(price - l)/l*100) for n, l in pivots], key=lambda x: x[1])
         pp_level = [v for k, v in pivots if k == "PP"][0]
         if price > pp_level: report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Üzerinde Güçlü. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": 15, "status": "bullish"}
         else: report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Altında Baskılı. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": -15, "status": "bearish"}
+        
     rsi_vals = calc_rsi(closes)
     if rsi_vals:
         curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
@@ -209,27 +219,37 @@ def generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, curren
         elif prev_rsi < 30 and curr_rsi > prev_rsi: report_data["RSI Göstergesi"] = {"detail": f"Dipten Kafayı Kaldırdı (%{curr_rsi:.1f}) 📈", "score": 25, "status": "bullish"}
         elif curr_rsi >= 75: report_data["RSI Göstergesi"] = {"detail": f"Tepe Seviyede! Aşırı Alım (%{curr_rsi:.1f}) ⚠️", "score": -35, "status": "bearish"}
         else: report_data["RSI Göstergesi"] = {"detail": f"Nötr Bölgede Salınıyor (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
+        
     m_line, s_line = calc_macd(closes)
     if len(m_line) >= 2 and len(s_line) >= 2:
         if m_line[-2] <= s_line[-2] and m_line[-1] > s_line[-1]: report_data["MACD Trendi"] = {"detail": "Aşağıdan Yukarı Net Kesti (AL) 🟢", "score": 25, "status": "bullish"}
         elif m_line[-2] >= s_line[-2] and m_line[-1] < s_line[-1]: report_data["MACD Trendi"] = {"detail": "Yukarıdan Aşağı Net Kesti (SAT) 🔴", "score": -25, "status": "bearish"}
+        
     if funding_rate != 0.0:
         if funding_rate >= 0.0005: report_data["Fonlama Oranı"] = {"detail": f"Yüksek Long Baskısı var (%{funding_rate*100:.3f})", "score": -10, "status": "bearish"}
         elif funding_rate <= -0.0005: report_data["Fonlama Oranı"] = {"detail": f"Yüksek Short Baskısı / Squeeze Potansiyeli! (%{funding_rate*100:.3f}) 🚀", "score": 20, "status": "bullish"}
+        
     raw_score = sum(v["score"] for v in report_data.values())
     confidence = min(100, abs(raw_score))
     direction = "IZLE"
     if confidence >= MIN_CONFIDENCE_TO_NOTIFY: direction = "AL" if raw_score > 0 else "SAT"
     if direction == "IZLE": return None
-    return {"symbol": symbol, "direction": direction, "confidence": confidence, "price": price, "report_data": report_data, "funding": funding_rate}
+    
+    # YENİ: Zaman dilimini (timeframe) sinyal verisine ekliyoruz.
+    return {"symbol": symbol, "timeframe": timeframe, "direction": direction, "confidence": confidence, "price": price, "report_data": report_data, "funding": funding_rate}
 
 def format_signal_message(sig):
     emoji = "🟢 [BOĞA RADARI]" if sig["direction"] == "AL" else "🔴 [AYI RADARI]"
     clean_sym = sig['symbol'].replace("-", "")
     price_val = sig['price']
     fmt = ".8f" if price_val < 1.0 else ".2f"
+    
+    # Zaman dilimini Türkçe ve güzel okunan bir formata çeviriyoruz
+    tf_str = sig['timeframe'].replace("15m", "15 Dakikalık").replace("1H", "1 Saatlik").replace("4H", "4 Saatlik").replace("1Dutc", "1 Günlük")
+    
     lines = [
         f"{emoji} <b>#{clean_sym}</b>",
+        f"<b>⏱ Grafik Periyodu:</b> {tf_str}",
         f"<b>Güncel Fiyat:</b> {price_val:{fmt}}",
         f"<b>Radar Gücü:</b> %{int(sig['confidence'])}",
         f"<b>Canlı Fonlama Oranı:</b> %{sig['funding']*100:.4f}",
@@ -257,7 +277,7 @@ def process_commands(state, watchlist):
             if sym not in watchlist: watchlist.append(sym); send_message(f"✅ {sym.replace('-', '')} eklendi.")
         elif clean_text.startswith("/remove") and len(clean_text.split()) >= 2:
             sym = clean_text.split()[1].upper()
-            if sym in watchlist: watchlist.remove(sym); state.get("last_signals", {}).pop(sym, None); send_message(f"🗑 {sym.replace('-', '')} silindi.")
+            if sym in watchlist: watchlist.remove(sym); send_message(f"🗑 {sym.replace('-', '')} silindi.")
         elif text.startswith("/list"): send_message("📋 Liste:\n" + "\n".join(f"• {s.replace('-', '')}" for s in watchlist))
         elif text.startswith("/all"): watchlist = ["ALL"]; save_json(WATCHLIST_FILE, watchlist); send_message("🌐 Tüm markete geçildi.")
         elif text.startswith("/manual"): watchlist = ["BTC-USDT", "ETH-USDT"]; save_json(WATCHLIST_FILE, watchlist); send_message("📋 Manuel moda geçildi.")
@@ -265,7 +285,7 @@ def process_commands(state, watchlist):
 
 def get_btc_state():
     try:
-        res = fetch_klines_okx("BTC-USDT")
+        res = fetch_klines_okx("BTC-USDT", timeframe="1H") # Trend kontrolü için 1 Saatlik baz alınır
         if not res or len(res) < 200: return None
         closes = [c["close"] for c in res]
         e200 = calc_ema(closes, 200)[-1]
@@ -288,23 +308,34 @@ def single_scan(state, watchlist):
     btc_state = get_btc_state()
     symbols = POPULAR_USDT_SYMBOLS if watchlist == ["ALL"] else watchlist
     print(f"🔄 Çok Boyutlu Röntgen Taraması: {len(symbols)} sembol taranıyor...")
+    
+    # YENİ: Önce sembolleri dönüyoruz, sonra her sembol için zaman dilimlerini tarıyoruz.
     for symbol in symbols:
-        try:
-            time.sleep(0.3)
-            candles = fetch_klines_okx(symbol)
-            prev_daily = fetch_prev_daily_okx(symbol)
-            funding_rate = fetch_funding_rate_okx(symbol)
-            current_oi = fetch_open_interest_okx(symbol)
-            sig = generate_signal(symbol, candles, prev_daily, btc_state, funding_rate, current_oi, state)
-            if not sig: continue
-            prev_dir = state["last_signals"].get(symbol)
-            if sig["direction"] != prev_dir:
-                send_message(format_signal_message(sig))
-                time.sleep(0.5)
-            state["last_signals"][symbol] = sig["direction"]
-        except Exception as e:
-            print(f"⚠️ {symbol} Hatası: {e}")
-            continue
+        for tf in TIMEFRAMES:
+            try:
+                time.sleep(0.3) # API limitine takılmamak için hafif bekleme
+                candles = fetch_klines_okx(symbol, timeframe=tf)
+                prev_daily = fetch_prev_daily_okx(symbol)
+                funding_rate = fetch_funding_rate_okx(symbol)
+                current_oi = fetch_open_interest_okx(symbol)
+                
+                sig = generate_signal(symbol, tf, candles, prev_daily, btc_state, funding_rate, current_oi, state)
+                if not sig: continue
+                
+                # Hafıza sistemi: Her sembol ve her zaman dilimi için ayrı kayıt tutar. (Örn: BTC-USDT_1H)
+                state_key = f"{symbol}_{tf}"
+                prev_dir = state["last_signals"].get(state_key)
+                
+                if sig["direction"] != prev_dir:
+                    send_message(format_signal_message(sig))
+                    time.sleep(0.5)
+                
+                state["last_signals"][state_key] = sig["direction"]
+                
+            except Exception as e:
+                print(f"⚠️ {symbol} ({tf}) Hatası: {e}")
+                continue
+            
     save_json(STATE_FILE, state)
 
 def main():
@@ -317,9 +348,11 @@ def main():
         state.setdefault("last_signals", {})
         try: watchlist, state = process_commands(state, watchlist); save_json(WATCHLIST_FILE, watchlist)
         except Exception: pass
+        
         single_scan(state, watchlist)
+        
         sleep_time = max(10, (15 * 60) - (time.time() - loop_start))
-        print(f"💤 Bekleme: {int(sleep_time)} sn...\n")
+        print(f"💤 Tüm zaman dilimleri tarandı. Bekleme: {int(sleep_time)} sn...\n")
         time.sleep(sleep_time)
 
 if __name__ == "__main__":
