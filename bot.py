@@ -1,11 +1,12 @@
 """
-Kesişim Radar - "Capitano Master Radar v4.5" (Fibonacci & Akıllı Filtre)
+Kesişim Radar - "Capitano Master Radar v4.6" (Fibonacci, Akıllı Filtre & Likidasyon Takibi)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - HASSAS FONLAMA ORANI ALGORİTMASI
 - AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI)
 - FİBONACCİ PİVOTLARI (TradingView Birebir Uyumlu)
 - BTC KORELASYON FİLTRESİ & Yüksek Seçicilik (45)
 - RSI, MACD ve Vadeli Açık Pozisyon (OI)
+- YENİ: OKX ANLIK LİKİDASYON (LONG/SHORT SQUEEZE) TAKİBİ
 """
 
 import json
@@ -126,6 +127,29 @@ def fetch_open_interest_okx(symbol):
         pass
     return 0.0
 
+def fetch_liquidations_okx(symbol):
+    """
+    OKX Kamu API'sinden son cross-margin swap likidasyon emirlerini çeker.
+    Long ve Short patlama büyüklüklerini döndürür.
+    """
+    try:
+        path = f"/api/v5/public/liquidation-orders?instType=SWAP&mgnMode=cross&instId={symbol}-SWAP&limit=10"
+        data = http_get_json(path)
+        long_liq = 0.0
+        short_liq = 0.0
+        if data.get("code") == "0" and data.get("data"):
+            for item in data["data"]:
+                for detail in item.get("details", []):
+                    side = detail.get("side")
+                    sz = float(detail.get("sz", 0))
+                    if side == "sell":   # Long patlaması (Zorunlu satış)
+                        long_liq += sz
+                    elif side == "buy":  # Short patlaması (Zorunlu alış / Squeeze)
+                        short_liq += sz
+        return long_liq, short_liq
+    except Exception:
+        return 0.0, 0.0
+
 def calc_ema(closes, period):
     if len(closes) < period: return []
     k = 2 / (period + 1)
@@ -157,7 +181,6 @@ def calc_macd(closes):
     macd_line = [e12 - e26 for e12, e26 in zip(ema12[-n:], ema26[-n:])]
     return macd_line, calc_ema(macd_line, 9)
 
-# YENİ FİBONACCİ PİVOT FONKSİYONU
 def fibonacci_pivots(h, l, c):
     pp = (h + l + c) / 3
     r = h - l
@@ -171,7 +194,7 @@ def fibonacci_pivots(h, l, c):
         ("S3", pp - (r * 1.000))
     ]
 
-def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_rate, current_oi, state):
+def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_rate, current_oi, long_liq, short_liq, state):
     if len(candles) < 50: return None
     last = candles[-1]
     price = last["close"]
@@ -201,10 +224,11 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         "Pivot Analizi": {"detail": "Pivot verisi eksik", "score": 0, "status": "neutral"},
         "RSI Göstergesi": {"detail": "Nötr bölge", "score": 0, "status": "neutral"},
         "MACD Trendi": {"detail": "Kesişim Yok ⚪", "score": 0, "status": "neutral"},
-        "Fonlama Oranı": {"detail": f"Dengeli (%{funding_rate*100:.4f})", "score": 0, "status": "neutral"}
+        "Fonlama Oranı": {"detail": f"Dengeli (%{funding_rate*100:.4f})", "score": 0, "status": "neutral"},
+        "Likidasyon Analizi": {"detail": "Sakin / Büyük Likidasyon Yok ⚪", "score": 0, "status": "neutral"}
     }
     
-    # Yeni Hacim Karar Mekanizması
+    # Hacim Karar Mekanizması
     if vol_ratio >= 1.7:
         if is_bullish_vol:
             report_data["Hacim Durumu"] = {"detail": f"Güçlü ALIM Hacmi Girişi (x{vol_ratio:.1f}) 🟢", "score": 25, "status": "bullish"}
@@ -216,6 +240,7 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
     if oi_change_pct >= 1.5: report_data["Açık Pozisyon (OI)"] = {"detail": f"Vadeliye Agresif Giriş Var (+%{oi_change_pct:.2f}) ⚡", "score": 20, "status": "bullish"}
     elif oi_change_pct <= -1.5: report_data["Açık Pozisyon (OI)"] = {"detail": f"Pozisyonlar Kapatılıyor (-%{oi_change_pct:.2f}) 📉", "score": -10, "status": "bearish"}
     
+    # EMA Yapısı
     ema50 = calc_ema(closes, 50)
     ema200 = calc_ema(closes, 200)
     if ema50 and ema200:
@@ -226,14 +251,15 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         elif price > e50_last and price > e200_last: report_data["EMA Yapısı"] = {"detail": f"Fiyat Trend Üstü Akümüle (EMA50: {e50_last:.2f})", "score": 20, "status": "bullish"}
         elif price < e50_last and price < e200_last: report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 Altında Sıkışık", "score": -20, "status": "bearish"}
         
+    # Pivot Analizi
     if prev_daily:
-        # PİVOT HESAPLAMASI FİBONACCİ'YE ÇEVRİLDİ
         pivots = fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
         nearest_name, nearest_dist = min([(n, abs(price - l)/l*100) for n, l in pivots], key=lambda x: x[1])
         pp_level = [v for k, v in pivots if k == "PP"][0]
         if price > pp_level: report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Üzerinde Güçlü. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": 15, "status": "bullish"}
         else: report_data["Pivot Analizi"] = {"detail": f"Pivot (PP) Altında Baskılı. En yakın: {nearest_name} (%{nearest_dist:.2f})", "score": -15, "status": "bearish"}
         
+    # RSI Göstergesi
     rsi_vals = calc_rsi(closes)
     if rsi_vals:
         curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
@@ -242,20 +268,29 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         elif curr_rsi >= 75: report_data["RSI Göstergesi"] = {"detail": f"Tepe Seviyede! Aşırı Alım (%{curr_rsi:.1f}) ⚠️", "score": -35, "status": "bearish"}
         else: report_data["RSI Göstergesi"] = {"detail": f"Nötr Bölgede Salınıyor (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
         
+    # MACD Trendi
     m_line, s_line = calc_macd(closes)
     if len(m_line) >= 2 and len(s_line) >= 2:
         if m_line[-2] <= s_line[-2] and m_line[-1] > s_line[-1]: report_data["MACD Trendi"] = {"detail": "Aşağıdan Yukarı Net Kesti (AL) 🟢", "score": 25, "status": "bullish"}
         elif m_line[-2] >= s_line[-2] and m_line[-1] < s_line[-1]: report_data["MACD Trendi"] = {"detail": "Yukarıdan Aşağı Net Kesti (SAT) 🔴", "score": -25, "status": "bearish"}
         
+    # Fonlama Oranı Analizi
     if funding_rate != 0.0:
         if funding_rate >= 0.0002: 
             report_data["Fonlama Oranı"] = {"detail": f"Long Baskısı / Piyasada Isınma Var (%{funding_rate*100:.4f}) ⚠️", "score": -10, "status": "bearish"}
         elif funding_rate <= -0.00015: 
             report_data["Fonlama Oranı"] = {"detail": f"Short Baskısı / Squeeze (Patlatma) Potansiyeli! (%{funding_rate*100:.4f}) 🚀", "score": 20, "status": "bullish"}
         
+    # YENİ: Likidasyon Karar Analizi
+    if short_liq > 0 or long_liq > 0:
+        if short_liq > long_liq:
+            report_data["Likidasyon Analizi"] = {"detail": f"Yoğun Short Patlaması Var ({short_liq:.1f} Kontrat) - Squeeze Hızlanabilir! 🚀", "score": 15, "status": "bullish"}
+        elif long_liq > short_liq:
+            report_data["Likidasyon Analizi"] = {"detail": f"Sert Long Patlaması / Flush Gerçekleşti ({long_liq:.1f} Kontrat) 🩸", "score": -15, "status": "bearish"}
+
     raw_score = sum(v["score"] for v in report_data.values())
     
-    # YENİ BTC KORELASYON FİLTRESİ
+    # BTC KORELASYON FİLTRESİ
     if btc_state and btc_state.get("trend") == "bearish" and raw_score > 0:
         raw_score -= 20 # BTC düşerken gelen "Al" sinyaline -20 ceza kesiyoruz.
     
@@ -345,7 +380,10 @@ def single_scan(state, watchlist):
                 funding_rate = fetch_funding_rate_okx(symbol)
                 current_oi = fetch_open_interest_okx(symbol)
                 
-                sig = generate_signal(symbol, tf, candles, prev_daily, btc_state, funding_rate, current_oi, state)
+                # YENİ: Likidasyon verisi taramaya eklendi
+                long_liq, short_liq = fetch_liquidations_okx(symbol)
+                
+                sig = generate_signal(symbol, tf, candles, prev_daily, btc_state, funding_rate, current_oi, long_liq, short_liq, state)
                 if not sig: continue
                 
                 state_key = f"{symbol}_{tf}"
