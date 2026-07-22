@@ -1,10 +1,10 @@
 """
-Kesişim Radar - "Capitano Master Radar v4.9" (Grafikli ve Pivot Renkli Sürüm)
+Kesişim Radar - "Capitano Master Radar v5.0" (Sadeleştirilmiş Grafik & Hacimli Sürüm)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - HASSAS FONLAMA ORANI ALGORİTMASI
-- AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI)
-- FİBONACCİ PİVOTLARI (Grafikte Renkli Çizgiler ve Başlık Seviyeleri)
-- BTC KORELASYON FİLTRESİ & Yüksek Seçicilik (45)
+- AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI & GRAFİK ÇUBUKLARI)
+- SADELEŞTİRİLMİŞ FİBONACCİ PİVOTLARI (R1, PP, S1)
+- BTC KORELASYON FİLTRESİ
 - RSI, MACD ve Vadeli Açık Pozisyon (OI)
 - OKX ANLIK LİKİDASYON TAKİBİ
 - CANLI GRAFİK ÇİZİMİ & TELEGRAM GÖRSEL GÖNDERİMİ
@@ -135,10 +135,10 @@ def send_photo(photo_path, caption):
         return {}
 
 def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.png"):
-    """Sinyal üretilen coin için EMA, Pivot, RSI ve MACD içeren grafik çizer."""
+    """Sadeleştirilmiş Pivot, Hacim, EMA, RSI ve MACD Grafiği Çizer."""
     try:
         df_data = []
-        for c in candles[-80:]:
+        for c in candles[-70:]:
             dt = datetime.datetime.fromtimestamp(c["openTime"] / 1000)
             df_data.append({
                 "Date": dt, "Open": c["open"], "High": c["high"],
@@ -160,51 +160,40 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         if len(ema200) == len(df):
             add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5)) # EMA200 (Turuncu)
             
-        # RSI Paneli (Panel 1)
+        # RSI Paneli (Panel 2 - Hacim Barları Panel 1'de Otomatik Yer Alır)
         rsi_vals = calc_rsi(closes)[-len(df):]
         if len(rsi_vals) == len(df):
-            add_plots.append(mpf.make_addplot(rsi_vals, panel=1, color='#7E57C2', ylabel='RSI (14)', ylim=(0, 100)))
+            add_plots.append(mpf.make_addplot(rsi_vals, panel=2, color='#7E57C2', ylabel='RSI (14)', ylim=(0, 100)))
             
-        # MACD Paneli (Panel 2)
+        # MACD Paneli (Panel 3)
         m_line, s_line = calc_macd(closes)
         m_vals = m_line[-len(df):]
         s_vals = s_line[-len(df):]
         if len(m_vals) == len(df) and len(s_vals) == len(df):
             hist = [m - s for m, s in zip(m_vals, s_vals)]
             colors = ['#26a69a' if h >= 0 else '#ef5350' for h in hist]
-            add_plots.append(mpf.make_addplot(m_vals, panel=2, color='#2962FF', ylabel='MACD'))
-            add_plots.append(mpf.make_addplot(s_vals, panel=2, color='#FF6D00'))
-            add_plots.append(mpf.make_addplot(hist, panel=2, type='bar', color=colors))
+            add_plots.append(mpf.make_addplot(m_vals, panel=3, color='#2962FF', ylabel='MACD'))
+            add_plots.append(mpf.make_addplot(s_vals, panel=3, color='#FF6D00'))
+            add_plots.append(mpf.make_addplot(hist, panel=3, type='bar', color=colors))
             
-        # Pivot Çizgileri & Metin Bilgisi
+        # Sadece Temel Pivot Seviyeleri (PP, R1, S1) - Kalabalığı Önler
         h_lines = []
         h_colors = []
         pivot_title_str = ""
         
         if prev_daily:
-            pivots = fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
-            pivot_dict = dict(pivots)
+            pivots = dict(fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"]))
             
-            # Renk Ayarları
-            color_map = {
-                "R3": "#D50000", "R2": "#FF1744", "R1": "#FF5252",
-                "PP": "#FFC107",  # Sarı Pivot Noktası
-                "S1": "#00E676", "S2": "#00C853", "S3": "#00B0FF"
-            }
+            # Sadece R1, PP ve S1 çizilir
+            key_pivots = [("R1", "#FF5252"), ("PP", "#FFC107"), ("S1", "#00E676")]
+            for name, color in key_pivots:
+                if name in pivots:
+                    h_lines.append(pivots[name])
+                    h_colors.append(color)
             
-            # Grafikte gösterilecek pivot seviyeleri
-            min_p = df['Low'].min()
-            max_p = df['High'].max()
-            margin = (max_p - min_p) * 0.8 # Fiyat marjı
-            
-            for name, val in pivots:
-                if (min_p - margin) <= val <= (max_p + margin):
-                    h_lines.append(val)
-                    h_colors.append(color_map.get(name, "#888888"))
-            
-            pp_v = pivot_dict.get("PP", 0)
-            r1_v = pivot_dict.get("R1", 0)
-            s1_v = pivot_dict.get("S1", 0)
+            pp_v = pivots.get("PP", 0)
+            r1_v = pivots.get("R1", 0)
+            s1_v = pivots.get("S1", 0)
             fmt = ".4f" if pp_v < 10 else ".2f"
             pivot_title_str = f"\n[PP: {pp_v:{fmt}} | R1: {r1_v:{fmt}} | S1: {s1_v:{fmt}}]"
 
@@ -212,10 +201,10 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             base_mpf_style='yahoo', 
             gridstyle=':', 
             y_on_right=True,
-            rc={'font.size': 9}
+            rc={'font.size': 8}
         )
         
-        chart_title = f"{symbol.replace('-', '')} ({timeframe}) - Capitano Master Radar{pivot_title_str}"
+        chart_title = f"{symbol.replace('-', '')} ({timeframe}) - Capitano Radar{pivot_title_str}"
         
         h_dict = None
         if h_lines:
@@ -224,7 +213,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         mpf.plot(
             df,
             type='candle',
-            volume=False,
+            volume=True, # Hacim çubukları açıldı
             addplot=add_plots,
             hlines=h_dict,
             style=style,
