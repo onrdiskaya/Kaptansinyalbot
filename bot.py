@@ -1,12 +1,9 @@
 """
-Kesişim Radar - "Capitano Master Radar v5.1" (Ekran Oturtma & Başlık Düzeltme Sürümü)
+Kesişim Radar - "Capitano Master Radar v5.2"
+- RSI UYUMSUZLUĞU (DIVERGENCE) TESPİTİ (Pozitif & Negatif Uyumsuzluk Radarı)
+- DİNAMİK MİKRO-COIN HASSASİYETİ (PEPE, SHIB vb. için 8 basamak desteği)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
-- HASSAS FONLAMA ORANI ALGORİTMASI
-- AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI & GRAFİK ÇUBUKLARI)
-- SADELEŞTİRİLMİŞ FİBONACCİ PİVOTLARI (R1, PP, S1)
-- BTC KORELASYON FİLTRESİ
-- RSI, MACD ve Vadeli Açık Pozisyon (OI)
-- OKX ANLIK LİKİDASYON TAKİBİ
+- AKILLI HACİM, EMA, RSI, MACD, PİVOT, OI & LİKİDASYON TAKİBİ
 - CANLI GRAFİK ÇİZİMİ & TELEGRAM GÖRSEL GÖNDERİMİ
 """
 
@@ -42,6 +39,15 @@ OKX_API_URLS = [
     "https://www.okx.cab",
     "https://www.okx.com"
 ]
+
+def fmt_price(val):
+    """Fiyatın küçüklüğüne göre dinamik basamak formatı sunar."""
+    if val == 0: return "0"
+    abs_v = abs(val)
+    if abs_v < 0.0001: return f"{val:.8f}"
+    elif abs_v < 1.0: return f"{val:.6f}"
+    elif abs_v < 100: return f"{val:.4f}"
+    else: return f"{val:.2f}"
 
 def html_escape(text):
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -156,9 +162,9 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         
         add_plots = []
         if len(ema50) == len(df):
-            add_plots.append(mpf.make_addplot(ema50, color='#2962FF', width=1.2)) # EMA50 (Mavi)
+            add_plots.append(mpf.make_addplot(ema50, color='#2962FF', width=1.2))
         if len(ema200) == len(df):
-            add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5)) # EMA200 (Turuncu)
+            add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5))
             
         # RSI Paneli (Panel 2)
         rsi_vals = calc_rsi(closes)[-len(df):]
@@ -193,8 +199,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             pp_v = pivots.get("PP", 0)
             r1_v = pivots.get("R1", 0)
             s1_v = pivots.get("S1", 0)
-            fmt = ".4f" if pp_v < 10 else ".2f"
-            pivot_title_str = f" | PP:{pp_v:{fmt}} R1:{r1_v:{fmt}} S1:{s1_v:{fmt}}"
+            pivot_title_str = f" | PP:{fmt_price(pp_v)} R1:{fmt_price(r1_v)} S1:{fmt_price(s1_v)}"
 
         style = mpf.make_mpf_style(
             base_mpf_style='yahoo', 
@@ -203,7 +208,6 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             rc={'font.size': 8}
         )
         
-        # Başlık tek satıra alındı (Üstten taşmayı önler)
         chart_title = f"{symbol.replace('-', '')} ({timeframe}){pivot_title_str}"
         
         h_dict = None
@@ -219,7 +223,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             style=style,
             title=chart_title,
             tight_layout=True,
-            savefig=dict(fname=filename, bbox_inches='tight', pad_inches=0.2), # Ekran kenarı boşluk ayarı
+            savefig=dict(fname=filename, bbox_inches='tight', pad_inches=0.2),
             figscale=1.2,
             warn_too_much_data=1000
         )
@@ -317,6 +321,36 @@ def calc_rsi(closes, period=14):
         rsi_vals.append(100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss))))
     return rsi_vals
 
+def detect_rsi_divergence(candles, rsi_vals, window=15):
+    """Fiyat ve RSI arasında Pozitif/Negatif Uyumsuzluk tespiti yapar."""
+    if len(candles) < window + 2 or len(rsi_vals) < window + 2:
+        return None
+    
+    recent_candles = candles[-window:]
+    recent_rsi = rsi_vals[-window:]
+    
+    # Son mum ve penceredeki en düşük/yüksek değerler
+    price_now = recent_candles[-1]["close"]
+    rsi_now = recent_rsi[-1]
+    
+    # En düşük dip indeksleri (Son mum hariç)
+    min_price_prev = min(c["low"] for c in recent_candles[:-3])
+    rsi_at_min_price = recent_rsi[recent_candles.index(next(c for c in recent_candles[:-3] if c["low"] == min_price_prev))]
+    
+    # En yüksek tepe indeksleri (Son mum hariç)
+    max_price_prev = max(c["high"] for c in recent_candles[:-3])
+    rsi_at_max_price = recent_rsi[recent_candles.index(next(c for c in recent_candles[:-3] if c["high"] == max_price_prev))]
+    
+    # POZİTİF UYUMSUZLUK (Bullish Divergence) -> Fiyat Yeni Dip, RSI Daha Yüksek Dip
+    if price_now < min_price_prev and rsi_now > rsi_at_min_price and rsi_now < 45:
+        return "BULLISH_DIV"
+        
+    # NEGATİF UYUMSUZLUK (Bearish Divergence) -> Fiyat Yeni Tepe, RSI Daha Düşük Tepe
+    if price_now > max_price_prev and rsi_now < rsi_at_max_price and rsi_now > 55:
+        return "BEARISH_DIV"
+        
+    return None
+
 def calc_macd(closes):
     if len(closes) < 20: return [], []
     ema12 = calc_ema(closes, 12)
@@ -388,7 +422,7 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
         e50_prev, e200_prev = ema50[-2], ema200[-2]
         if e50_prev <= e200_prev and e50_last > e200_last: report_data["EMA Yapısı"] = {"detail": "Golden Cross Kesişimi Uçtu! 🚀", "score": 45, "status": "bullish"}
         elif e50_prev >= e200_prev and e50_last < e200_last: report_data["EMA Yapısı"] = {"detail": "Death Cross Kesişimi Düştü! 💀", "score": -45, "status": "bearish"}
-        elif price > e50_last and price > e200_last: report_data["EMA Yapısı"] = {"detail": f"Fiyat Trend Üstü Akümüle (EMA50: {e50_last:.2f})", "score": 20, "status": "bullish"}
+        elif price > e50_last and price > e200_last: report_data["EMA Yapısı"] = {"detail": f"Fiyat Trend Üstü Akümüle (EMA50: {fmt_price(e50_last)})", "score": 20, "status": "bullish"}
         elif price < e50_last and price < e200_last: report_data["EMA Yapısı"] = {"detail": "Fiyat EMA 50 & 200 Altında Sıkışık", "score": -20, "status": "bearish"}
         
     if prev_daily:
@@ -401,10 +435,20 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
     rsi_vals = calc_rsi(closes)
     if rsi_vals:
         curr_rsi, prev_rsi = rsi_vals[-1], rsi_vals[-2]
-        if curr_rsi <= 25: report_data["RSI Göstergesi"] = {"detail": f"Dip Seviyede! Aşırı Satım (%{curr_rsi:.1f}) 🚨", "score": 35, "status": "bullish"}
-        elif prev_rsi < 30 and curr_rsi > prev_rsi: report_data["RSI Göstergesi"] = {"detail": f"Dipten Kafayı Kaldırdı (%{curr_rsi:.1f}) 📈", "score": 25, "status": "bullish"}
-        elif curr_rsi >= 75: report_data["RSI Göstergesi"] = {"detail": f"Tepe Seviyede! Aşırı Alım (%{curr_rsi:.1f}) ⚠️", "score": -35, "status": "bearish"}
-        else: report_data["RSI Göstergesi"] = {"detail": f"Nötr Bölgede Salınıyor (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
+        div_status = detect_rsi_divergence(candles, rsi_vals)
+        
+        if div_status == "BULLISH_DIV":
+            report_data["RSI Göstergesi"] = {"detail": f"⚠️ POZİTİF UYUMSUZLUK (Dipten Dönüş Sinyali! RSI: {curr_rsi:.1f}) 🔥", "score": 40, "status": "bullish"}
+        elif div_status == "BEARISH_DIV":
+            report_data["RSI Göstergesi"] = {"detail": f"⚠️ NEGATİF UYUMSUZLUK (Tepeden Düşüş Sinyali! RSI: {curr_rsi:.1f}) 🩸", "score": -40, "status": "bearish"}
+        elif curr_rsi <= 25: 
+            report_data["RSI Göstergesi"] = {"detail": f"Dip Seviyede! Aşırı Satım (%{curr_rsi:.1f}) 🚨", "score": 35, "status": "bullish"}
+        elif prev_rsi < 30 and curr_rsi > prev_rsi: 
+            report_data["RSI Göstergesi"] = {"detail": f"Dipten Kafayı Kaldırdı (%{curr_rsi:.1f}) 📈", "score": 25, "status": "bullish"}
+        elif curr_rsi >= 75: 
+            report_data["RSI Göstergesi"] = {"detail": f"Tepe Seviyede! Aşırı Alım (%{curr_rsi:.1f}) ⚠️", "score": -35, "status": "bearish"}
+        else: 
+            report_data["RSI Göstergesi"] = {"detail": f"Nötr Bölgede Salınıyor (%{curr_rsi:.1f})", "score": 0, "status": "neutral"}
         
     m_line, s_line = calc_macd(closes)
     if len(m_line) >= 2 and len(s_line) >= 2:
@@ -438,8 +482,6 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
 def format_signal_message(sig):
     emoji = "🟢 [BOĞA RADARI]" if sig["direction"] == "AL" else "🔴 [AYI RADARI]"
     clean_sym = sig['symbol'].replace("-", "")
-    price_val = sig['price']
-    fmt = ".8f" if price_val < 1.0 else ".2f"
     
     tf_str = sig['timeframe'].replace("15m", "15 Dakikalık").replace("1H", "1 Saatlik").replace("4H", "4 Saatlik").replace("1Dutc", "1 Günlük")
     tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{clean_sym}"
@@ -447,7 +489,7 @@ def format_signal_message(sig):
     lines = [
         f"{emoji} <b>#{clean_sym}</b>",
         f"<b>⏱ Periyot:</b> {tf_str}",
-        f"<b>Güncel Fiyat:</b> {price_val:{fmt}}",
+        f"<b>Güncel Fiyat:</b> {fmt_price(sig['price'])}",
         f"<b>Radar Gücü:</b> %{int(sig['confidence'])}",
         f"<b>Fonlama:</b> %{sig['funding']*100:.4f}",
         "---",
