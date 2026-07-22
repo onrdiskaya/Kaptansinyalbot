@@ -1,5 +1,5 @@
 """
-Kesişim Radar - "Capitano Master Radar v5.0" (Sadeleştirilmiş Grafik & Hacimli Sürüm)
+Kesişim Radar - "Capitano Master Radar v5.1" (Ekran Oturtma & Başlık Düzeltme Sürümü)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - HASSAS FONLAMA ORANI ALGORİTMASI
 - AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI & GRAFİK ÇUBUKLARI)
@@ -135,7 +135,7 @@ def send_photo(photo_path, caption):
         return {}
 
 def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.png"):
-    """Sadeleştirilmiş Pivot, Hacim, EMA, RSI ve MACD Grafiği Çizer."""
+    """Düzeltilmiş Başlık Hizalama, Hacim, EMA, RSI ve MACD Grafiği Çizer."""
     try:
         df_data = []
         for c in candles[-70:]:
@@ -160,7 +160,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         if len(ema200) == len(df):
             add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5)) # EMA200 (Turuncu)
             
-        # RSI Paneli (Panel 2 - Hacim Barları Panel 1'de Otomatik Yer Alır)
+        # RSI Paneli (Panel 2)
         rsi_vals = calc_rsi(closes)[-len(df):]
         if len(rsi_vals) == len(df):
             add_plots.append(mpf.make_addplot(rsi_vals, panel=2, color='#7E57C2', ylabel='RSI (14)', ylim=(0, 100)))
@@ -176,7 +176,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             add_plots.append(mpf.make_addplot(s_vals, panel=3, color='#FF6D00'))
             add_plots.append(mpf.make_addplot(hist, panel=3, type='bar', color=colors))
             
-        # Sadece Temel Pivot Seviyeleri (PP, R1, S1) - Kalabalığı Önler
+        # Pivot Çizgileri
         h_lines = []
         h_colors = []
         pivot_title_str = ""
@@ -184,7 +184,6 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         if prev_daily:
             pivots = dict(fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"]))
             
-            # Sadece R1, PP ve S1 çizilir
             key_pivots = [("R1", "#FF5252"), ("PP", "#FFC107"), ("S1", "#00E676")]
             for name, color in key_pivots:
                 if name in pivots:
@@ -195,7 +194,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             r1_v = pivots.get("R1", 0)
             s1_v = pivots.get("S1", 0)
             fmt = ".4f" if pp_v < 10 else ".2f"
-            pivot_title_str = f"\n[PP: {pp_v:{fmt}} | R1: {r1_v:{fmt}} | S1: {s1_v:{fmt}}]"
+            pivot_title_str = f" | PP:{pp_v:{fmt}} R1:{r1_v:{fmt}} S1:{s1_v:{fmt}}"
 
         style = mpf.make_mpf_style(
             base_mpf_style='yahoo', 
@@ -204,7 +203,8 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             rc={'font.size': 8}
         )
         
-        chart_title = f"{symbol.replace('-', '')} ({timeframe}) - Capitano Radar{pivot_title_str}"
+        # Başlık tek satıra alındı (Üstten taşmayı önler)
+        chart_title = f"{symbol.replace('-', '')} ({timeframe}){pivot_title_str}"
         
         h_dict = None
         if h_lines:
@@ -213,12 +213,13 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         mpf.plot(
             df,
             type='candle',
-            volume=True, # Hacim çubukları açıldı
+            volume=True,
             addplot=add_plots,
             hlines=h_dict,
             style=style,
             title=chart_title,
-            savefig=filename,
+            tight_layout=True,
+            savefig=dict(fname=filename, bbox_inches='tight', pad_inches=0.2), # Ekran kenarı boşluk ayarı
             figscale=1.2,
             warn_too_much_data=1000
         )
