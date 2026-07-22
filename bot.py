@@ -1,7 +1,8 @@
 """
-Kesişim Radar - "Capitano Master Radar v5.2"
-- RSI UYUMSUZLUĞU (DIVERGENCE) TESPİTİ (Pozitif & Negatif Uyumsuzluk Radarı)
-- DİNAMİK MİKRO-COIN HASSASİYETİ (PEPE, SHIB vb. için 8 basamak desteği)
+Kesişim Radar - "Capitano Master Radar v5.3"
+- MUM FORMASYONLARI ANALİZİ (Yutan Boğa/Ayı, Çekiç, Ters Çekiç, Doji)
+- RSI UYUMSUZLUĞU (DIVERGENCE) TESPİTİ
+- DİNAMİK MİKRO-COIN HASSASİYETİ (8 basamak desteği)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - AKILLI HACİM, EMA, RSI, MACD, PİVOT, OI & LİKİDASYON TAKİBİ
 - CANLI GRAFİK ÇİZİMİ & TELEGRAM GÖRSEL GÖNDERİMİ
@@ -156,7 +157,6 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         
         closes = [c["close"] for c in candles]
         
-        # EMA Hesaplamaları
         ema50 = calc_ema(closes, 50)[-len(df):]
         ema200 = calc_ema(closes, 200)[-len(df):]
         
@@ -166,12 +166,10 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         if len(ema200) == len(df):
             add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5))
             
-        # RSI Paneli (Panel 2)
         rsi_vals = calc_rsi(closes)[-len(df):]
         if len(rsi_vals) == len(df):
             add_plots.append(mpf.make_addplot(rsi_vals, panel=2, color='#7E57C2', ylabel='RSI (14)', ylim=(0, 100)))
             
-        # MACD Paneli (Panel 3)
         m_line, s_line = calc_macd(closes)
         m_vals = m_line[-len(df):]
         s_vals = s_line[-len(df):]
@@ -182,7 +180,6 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             add_plots.append(mpf.make_addplot(s_vals, panel=3, color='#FF6D00'))
             add_plots.append(mpf.make_addplot(hist, panel=3, type='bar', color=colors))
             
-        # Pivot Çizgileri
         h_lines = []
         h_colors = []
         pivot_title_str = ""
@@ -321,6 +318,50 @@ def calc_rsi(closes, period=14):
         rsi_vals.append(100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss))))
     return rsi_vals
 
+def detect_candlestick_pattern(candles):
+    """Mum Formasyonları Tespiti (Yutan Boğa/Ayı, Çekiç, Ters Çekiç, Doji)"""
+    if len(candles) < 3:
+        return "Nötr / Belirgin Formasyon Yok ⚪", 0, "neutral"
+        
+    c1 = candles[-2] # Bir önceki mum
+    c2 = candles[-1] # Güncel mum
+    
+    c1_o, c1_c = c1["open"], c1["close"]
+    c2_o, c2_c, c2_h, c2_l = c2["open"], c2["close"], c2["high"], c2["low"]
+    
+    c2_body = abs(c2_c - c2_o)
+    c2_range = c2_h - c2_l
+    c2_upper_wick = c2_h - max(c2_o, c2_c)
+    c2_lower_wick = min(c2_o, c2_c) - c2_l
+    c1_body = abs(c1_c - c1_o)
+    
+    if c2_range == 0:
+        return "Nötr / Belirgin Formasyon Yok ⚪", 0, "neutral"
+        
+    # 1. Bullish Engulfing (Yutan Boğa)
+    if c1_c < c1_o and c2_c > c2_o:
+        if c2_o <= c1_c and c2_c >= c1_o and c2_body > c1_body:
+            return "Yutan Boğa (Bullish Engulfing) 🟢", 25, "bullish"
+
+    # 2. Bearish Engulfing (Yutan Ayı)
+    if c1_c > c1_o and c2_c < c2_o:
+        if c2_o >= c1_c and c2_c <= c1_o and c2_body > c1_body:
+            return "Yutan Ayı (Bearish Engulfing) 🔴", -25, "bearish"
+            
+    # 3. Hammer / Dip İğnesi
+    if c2_lower_wick >= 2 * c2_body and c2_upper_wick <= c2_body * 0.5 and c2_body > 0:
+        return "Çekiç / Dip İğnesi (Hammer) 🔨🟢", 20, "bullish"
+        
+    # 4. Shooting Star / Tepe İğnesi
+    if c2_upper_wick >= 2 * c2_body and c2_lower_wick <= c2_body * 0.5 and c2_body > 0:
+        return "Ters Çekiç / Tepe İğnesi (Shooting Star) 🌠🔴", -20, "bearish"
+
+    # 5. Doji (Kararsızlık)
+    if c2_body / c2_range <= 0.1:
+        return "Doji / Kararsızlık Mumu ⚖️", 0, "neutral"
+        
+    return "Nötr / Belirgin Formasyon Yok ⚪", 0, "neutral"
+
 def detect_rsi_divergence(candles, rsi_vals, window=15):
     """Fiyat ve RSI arasında Pozitif/Negatif Uyumsuzluk tespiti yapar."""
     if len(candles) < window + 2 or len(rsi_vals) < window + 2:
@@ -329,23 +370,18 @@ def detect_rsi_divergence(candles, rsi_vals, window=15):
     recent_candles = candles[-window:]
     recent_rsi = rsi_vals[-window:]
     
-    # Son mum ve penceredeki en düşük/yüksek değerler
     price_now = recent_candles[-1]["close"]
     rsi_now = recent_rsi[-1]
     
-    # En düşük dip indeksleri (Son mum hariç)
     min_price_prev = min(c["low"] for c in recent_candles[:-3])
     rsi_at_min_price = recent_rsi[recent_candles.index(next(c for c in recent_candles[:-3] if c["low"] == min_price_prev))]
     
-    # En yüksek tepe indeksleri (Son mum hariç)
     max_price_prev = max(c["high"] for c in recent_candles[:-3])
     rsi_at_max_price = recent_rsi[recent_candles.index(next(c for c in recent_candles[:-3] if c["high"] == max_price_prev))]
     
-    # POZİTİF UYUMSUZLUK (Bullish Divergence) -> Fiyat Yeni Dip, RSI Daha Yüksek Dip
     if price_now < min_price_prev and rsi_now > rsi_at_min_price and rsi_now < 45:
         return "BULLISH_DIV"
         
-    # NEGATİF UYUMSUZLUK (Bearish Divergence) -> Fiyat Yeni Tepe, RSI Daha Düşük Tepe
     if price_now > max_price_prev and rsi_now < rsi_at_max_price and rsi_now > 55:
         return "BEARISH_DIV"
         
@@ -393,7 +429,10 @@ def generate_signal(symbol, timeframe, candles, prev_daily, btc_state, funding_r
     if prev_oi > 0:
         oi_change_pct = ((current_oi - prev_oi) / prev_oi) * 100
         
+    pat_detail, pat_score, pat_status = detect_candlestick_pattern(candles)
+        
     report_data = {
+        "Mum Formasyonu": {"detail": pat_detail, "score": pat_score, "status": pat_status},
         "Hacim Durumu": {"detail": f"Nötr Yatay (x{vol_ratio:.1f})", "score": 0, "status": "neutral"},
         "Açık Pozisyon (OI)": {"detail": "OI Sabit", "score": 0, "status": "neutral"},
         "EMA Yapısı": {"detail": "Nötr / Kesişim Yok", "score": 0, "status": "neutral"},
