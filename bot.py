@@ -1,5 +1,5 @@
 """
-Kesişim Radar - "Capitano Master Radar v4.7" (Fibonacci, Akıllı Filtre, Likidasyon & TV Link)
+Kesişim Radar - "Capitano Master Radar v4.8" (Grafikli Sürüm)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - HASSAS FONLAMA ORANI ALGORİTMASI
 - AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI)
@@ -7,6 +7,7 @@ Kesişim Radar - "Capitano Master Radar v4.7" (Fibonacci, Akıllı Filtre, Likid
 - BTC KORELASYON FİLTRESİ & Yüksek Seçicilik (45)
 - RSI, MACD ve Vadeli Açık Pozisyon (OI)
 - OKX ANLIK LİKİDASYON (LONG/SHORT SQUEEZE) TAKİBİ
+- CANLI GRAFİK ÇİZİMİ & TELEGRAM GÖRSEL GÖNDERİMİ
 - TEK TIKLA TRADINGVIEW GRAFİK ENTEGRASYONU
 """
 
@@ -14,8 +15,11 @@ import json
 import os
 import sys
 import time
+import datetime
 import urllib.request
 import urllib.parse
+import pandas as pd
+import mplfinance as mpf
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = "-1004339033046" # Güncel Capitano Market Radar ID'si
@@ -33,7 +37,7 @@ POPULAR_USDT_SYMBOLS = [
 ]
 
 TIMEFRAMES = ["15m", "1H", "4H", "1Dutc"]
-MIN_CONFIDENCE_TO_NOTIFY = 45 # Baraj 45'te sabit (İdeal Sıklık)
+MIN_CONFIDENCE_TO_NOTIFY = 45 # Baraj 45'te sabit
 
 OKX_API_URLS = [
     "https://www.okx.cab",
@@ -78,9 +82,138 @@ def send_message(text):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True # Link önizlemesini kapatarak mesajı sade tutar
+        "disable_web_page_preview": True
     }
     telegram_api("sendMessage", params)
+
+def send_photo(photo_path, caption):
+    """Telegram'a grafikli sinyal mesajı gönderir."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return {}
+    
+    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    
+    body = []
+    
+    # Chat ID
+    body.append(f'--{boundary}'.encode())
+    body.append(b'Content-Disposition: form-data; name="chat_id"')
+    body.append(b'')
+    body.append(TELEGRAM_CHAT_ID.encode())
+    
+    # Parse Mode
+    body.append(f'--{boundary}'.encode())
+    body.append(b'Content-Disposition: form-data; name="parse_mode"')
+    body.append(b'')
+    body.append(b'HTML')
+    
+    # Caption (Sinyal Metni)
+    body.append(f'--{boundary}'.encode())
+    body.append(b'Content-Disposition: form-data; name="caption"')
+    body.append(b'')
+    body.append(caption.encode('utf-8'))
+    
+    # Photo Dosyası
+    body.append(f'--{boundary}'.encode())
+    body.append(b'Content-Disposition: form-data; name="photo"; filename="chart.png"')
+    body.append(b'Content-Type: image/png')
+    body.append(b'')
+    with open(photo_path, 'rb') as f:
+        body.append(f.read())
+        
+    body.append(f'--{boundary}--'.encode())
+    body.append(b'')
+    
+    payload = b'\r\n'.join(body)
+    headers = {
+        'Content-Type': f'multipart/form-data; boundary={boundary}',
+        'User-Agent': 'Mozilla/5.0'
+    }
+    
+    try:
+        req = urllib.request.Request(url, data=payload, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"⚠️ Görsel Gönderme Hatası: {e}. Sadece metin gönderiliyor...")
+        send_message(caption)
+        return {}
+
+def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.png"):
+    """Sinyal üretilen coin için EMA, Pivot, RSI ve MACD içeren grafik çizer."""
+    try:
+        df_data = []
+        for c in candles[-80:]:  # Son 80 mumu grafiğe al
+            dt = datetime.datetime.fromtimestamp(c["openTime"] / 1000)
+            df_data.append({
+                "Date": dt, "Open": c["open"], "High": c["high"],
+                "Low": c["low"], "Close": c["close"], "Volume": c["volume"]
+            })
+        
+        df = pd.DataFrame(df_data)
+        df.set_index("Date", inplace=True)
+        
+        closes = [c["close"] for c in candles]
+        
+        # EMA Hesaplamaları
+        ema50 = calc_ema(closes, 50)[-len(df):]
+        ema200 = calc_ema(closes, 200)[-len(df):]
+        
+        add_plots = []
+        if len(ema50) == len(df):
+            add_plots.append(mpf.make_addplot(ema50, color='#2962FF', width=1.2)) # Mavi EMA50
+        if len(ema200) == len(df):
+            add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5)) # Turuncu EMA200
+            
+        # RSI Paneli (Panel 1)
+        rsi_vals = calc_rsi(closes)[-len(df):]
+        if len(rsi_vals) == len(df):
+            add_plots.append(mpf.make_addplot(rsi_vals, panel=1, color='#7E57C2', ylabel='RSI (14)', ylim=(0, 100)))
+            
+        # MACD Paneli (Panel 2)
+        m_line, s_line = calc_macd(closes)
+        m_vals = m_line[-len(df):]
+        s_vals = s_line[-len(df):]
+        if len(m_vals) == len(df) and len(s_vals) == len(df):
+            hist = [m - s for m, s in zip(m_vals, s_vals)]
+            colors = ['#26a69a' if h >= 0 else '#ef5350' for h in hist]
+            add_plots.append(mpf.make_addplot(m_vals, panel=2, color='#2962FF', ylabel='MACD'))
+            add_plots.append(mpf.make_addplot(s_vals, panel=2, color='#FF6D00'))
+            add_plots.append(mpf.make_addplot(hist, panel=2, type='bar', color=colors))
+            
+        # Pivot Çizgileri
+        h_lines = []
+        if prev_daily:
+            pivots = fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
+            h_lines = [val for name, val in pivots if name in ["PP", "R1", "S1"]]
+
+        # Temiz Görünüm Stili
+        style = mpf.make_mpf_style(
+            base_mpf_style='yahoo', 
+            gridstyle=':', 
+            y_on_right=True,
+            rc={'font.size': 9}
+        )
+        
+        chart_title = f"\n{symbol.replace('-', '')} ({timeframe}) - Capitano Master Radar"
+        
+        mpf.plot(
+            df,
+            type='candle',
+            volume=False,
+            addplot=add_plots,
+            hlines=dict(hlines=h_lines, colors=['#9E9E9E', '#26a69a', '#ef5350'], linestyle='--', linewidths=0.8) if h_lines else None,
+            style=style,
+            title=chart_title,
+            savefig=filename,
+            figscale=1.2,
+            warn_too_much_data=1000
+        )
+        return filename
+    except Exception as e:
+        print(f"⚠️ Grafik Oluşturma Hatası: {e}")
+        return None
 
 def fetch_klines_okx(symbol, timeframe, limit=250):
     path = f"/api/v5/market/candles?instId={symbol}&bar={timeframe}&limit={limit}"
@@ -380,7 +513,16 @@ def single_scan(state, watchlist):
                 prev_dir = state["last_signals"].get(state_key)
                 
                 if sig["direction"] != prev_dir:
-                    send_message(format_signal_message(sig))
+                    caption = format_signal_message(sig)
+                    # Grafik oluştur ve görselli mesaj gönder
+                    chart_file = generate_chart(symbol, tf, candles, prev_daily)
+                    if chart_file and os.path.exists(chart_file):
+                        send_photo(chart_file, caption)
+                        try: os.remove(chart_file)  # Geçici grafik dosyasını temizle
+                        except Exception: pass
+                    else:
+                        send_message(caption)
+                        
                     time.sleep(0.5)
                 
                 state["last_signals"][state_key] = sig["direction"]
