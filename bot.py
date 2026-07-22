@@ -1,14 +1,13 @@
 """
-Kesişim Radar - "Capitano Master Radar v4.8" (Grafikli Sürüm)
+Kesişim Radar - "Capitano Master Radar v4.9" (Grafikli ve Pivot Renkli Sürüm)
 - ÇOKLU ZAMAN DİLİMİ (15m, 1H, 4H, 1D)
 - HASSAS FONLAMA ORANI ALGORİTMASI
 - AKILLI HACİM (ALIM/SATIŞ YÖNÜ AYRIMI)
-- FİBONACCİ PİVOTLARI (TradingView Birebir Uyumlu)
+- FİBONACCİ PİVOTLARI (Grafikte Renkli Çizgiler ve Başlık Seviyeleri)
 - BTC KORELASYON FİLTRESİ & Yüksek Seçicilik (45)
 - RSI, MACD ve Vadeli Açık Pozisyon (OI)
-- OKX ANLIK LİKİDASYON (LONG/SHORT SQUEEZE) TAKİBİ
+- OKX ANLIK LİKİDASYON TAKİBİ
 - CANLI GRAFİK ÇİZİMİ & TELEGRAM GÖRSEL GÖNDERİMİ
-- TEK TIKLA TRADINGVIEW GRAFİK ENTEGRASYONU
 """
 
 import json
@@ -22,7 +21,7 @@ import pandas as pd
 import mplfinance as mpf
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = "-1004339033046" # Güncel Capitano Market Radar ID'si
+TELEGRAM_CHAT_ID = "-1004339033046"
 
 WATCHLIST_FILE = "watchlist.json"
 STATE_FILE = "state.json"
@@ -37,7 +36,7 @@ POPULAR_USDT_SYMBOLS = [
 ]
 
 TIMEFRAMES = ["15m", "1H", "4H", "1Dutc"]
-MIN_CONFIDENCE_TO_NOTIFY = 45 # Baraj 45'te sabit
+MIN_CONFIDENCE_TO_NOTIFY = 45
 
 OKX_API_URLS = [
     "https://www.okx.cab",
@@ -87,7 +86,6 @@ def send_message(text):
     telegram_api("sendMessage", params)
 
 def send_photo(photo_path, caption):
-    """Telegram'a grafikli sinyal mesajı gönderir."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return {}
     
@@ -96,25 +94,21 @@ def send_photo(photo_path, caption):
     
     body = []
     
-    # Chat ID
     body.append(f'--{boundary}'.encode())
     body.append(b'Content-Disposition: form-data; name="chat_id"')
     body.append(b'')
     body.append(TELEGRAM_CHAT_ID.encode())
     
-    # Parse Mode
     body.append(f'--{boundary}'.encode())
     body.append(b'Content-Disposition: form-data; name="parse_mode"')
     body.append(b'')
     body.append(b'HTML')
     
-    # Caption (Sinyal Metni)
     body.append(f'--{boundary}'.encode())
     body.append(b'Content-Disposition: form-data; name="caption"')
     body.append(b'')
     body.append(caption.encode('utf-8'))
     
-    # Photo Dosyası
     body.append(f'--{boundary}'.encode())
     body.append(b'Content-Disposition: form-data; name="photo"; filename="chart.png"')
     body.append(b'Content-Type: image/png')
@@ -136,7 +130,7 @@ def send_photo(photo_path, caption):
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"⚠️ Görsel Gönderme Hatası: {e}. Sadece metin gönderiliyor...")
+        print(f"⚠️ Görsel Gönderme Hatası: {e}")
         send_message(caption)
         return {}
 
@@ -144,7 +138,7 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
     """Sinyal üretilen coin için EMA, Pivot, RSI ve MACD içeren grafik çizer."""
     try:
         df_data = []
-        for c in candles[-80:]:  # Son 80 mumu grafiğe al
+        for c in candles[-80:]:
             dt = datetime.datetime.fromtimestamp(c["openTime"] / 1000)
             df_data.append({
                 "Date": dt, "Open": c["open"], "High": c["high"],
@@ -162,9 +156,9 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
         
         add_plots = []
         if len(ema50) == len(df):
-            add_plots.append(mpf.make_addplot(ema50, color='#2962FF', width=1.2)) # Mavi EMA50
+            add_plots.append(mpf.make_addplot(ema50, color='#2962FF', width=1.2)) # EMA50 (Mavi)
         if len(ema200) == len(df):
-            add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5)) # Turuncu EMA200
+            add_plots.append(mpf.make_addplot(ema200, color='#FF6D00', width=1.5)) # EMA200 (Turuncu)
             
         # RSI Paneli (Panel 1)
         rsi_vals = calc_rsi(closes)[-len(df):]
@@ -182,13 +176,38 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             add_plots.append(mpf.make_addplot(s_vals, panel=2, color='#FF6D00'))
             add_plots.append(mpf.make_addplot(hist, panel=2, type='bar', color=colors))
             
-        # Pivot Çizgileri
+        # Pivot Çizgileri & Metin Bilgisi
         h_lines = []
+        h_colors = []
+        pivot_title_str = ""
+        
         if prev_daily:
             pivots = fibonacci_pivots(prev_daily["high"], prev_daily["low"], prev_daily["close"])
-            h_lines = [val for name, val in pivots if name in ["PP", "R1", "S1"]]
+            pivot_dict = dict(pivots)
+            
+            # Renk Ayarları
+            color_map = {
+                "R3": "#D50000", "R2": "#FF1744", "R1": "#FF5252",
+                "PP": "#FFC107",  # Sarı Pivot Noktası
+                "S1": "#00E676", "S2": "#00C853", "S3": "#00B0FF"
+            }
+            
+            # Grafikte gösterilecek pivot seviyeleri
+            min_p = df['Low'].min()
+            max_p = df['High'].max()
+            margin = (max_p - min_p) * 0.8 # Fiyat marjı
+            
+            for name, val in pivots:
+                if (min_p - margin) <= val <= (max_p + margin):
+                    h_lines.append(val)
+                    h_colors.append(color_map.get(name, "#888888"))
+            
+            pp_v = pivot_dict.get("PP", 0)
+            r1_v = pivot_dict.get("R1", 0)
+            s1_v = pivot_dict.get("S1", 0)
+            fmt = ".4f" if pp_v < 10 else ".2f"
+            pivot_title_str = f"\n[PP: {pp_v:{fmt}} | R1: {r1_v:{fmt}} | S1: {s1_v:{fmt}}]"
 
-        # Temiz Görünüm Stili
         style = mpf.make_mpf_style(
             base_mpf_style='yahoo', 
             gridstyle=':', 
@@ -196,14 +215,18 @@ def generate_chart(symbol, timeframe, candles, prev_daily, filename="temp_chart.
             rc={'font.size': 9}
         )
         
-        chart_title = f"\n{symbol.replace('-', '')} ({timeframe}) - Capitano Master Radar"
+        chart_title = f"{symbol.replace('-', '')} ({timeframe}) - Capitano Master Radar{pivot_title_str}"
         
+        h_dict = None
+        if h_lines:
+            h_dict = dict(hlines=h_lines, colors=h_colors, linestyle='--', linewidths=1.2)
+
         mpf.plot(
             df,
             type='candle',
             volume=False,
             addplot=add_plots,
-            hlines=dict(hlines=h_lines, colors=['#9E9E9E', '#26a69a', '#ef5350'], linestyle='--', linewidths=0.8) if h_lines else None,
+            hlines=h_dict,
             style=style,
             title=chart_title,
             savefig=filename,
@@ -273,9 +296,9 @@ def fetch_liquidations_okx(symbol):
                 for detail in item.get("details", []):
                     side = detail.get("side")
                     sz = float(detail.get("sz", 0))
-                    if side == "sell":   # Long patlaması
+                    if side == "sell":
                         long_liq += sz
-                    elif side == "buy":  # Short patlaması
+                    elif side == "buy":
                         short_liq += sz
         return long_liq, short_liq
     except Exception:
@@ -514,11 +537,10 @@ def single_scan(state, watchlist):
                 
                 if sig["direction"] != prev_dir:
                     caption = format_signal_message(sig)
-                    # Grafik oluştur ve görselli mesaj gönder
                     chart_file = generate_chart(symbol, tf, candles, prev_daily)
                     if chart_file and os.path.exists(chart_file):
                         send_photo(chart_file, caption)
-                        try: os.remove(chart_file)  # Geçici grafik dosyasını temizle
+                        try: os.remove(chart_file)
                         except Exception: pass
                     else:
                         send_message(caption)
