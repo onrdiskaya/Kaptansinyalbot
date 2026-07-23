@@ -1,2 +1,2 @@
-# Bu proje sadece Python standart kütüphanesini kullanıyor (urllib, json).
-# Ek paket gerekmiyor, bu dosya sadece workflow adımı için placeholder.
+pandas
+mplfinance
